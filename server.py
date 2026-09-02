@@ -1,80 +1,604 @@
-import os
-import io
-import requests
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import HTMLResponse, Response, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
-import uvicorn
-
-app = FastAPI()
-
-# Разрешаем любые домены (важно, чтобы работало в браузере)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Храним данные в памяти (для одного пользователя достаточно)
-current_data = []
-
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    # Отдаем ваш HTML
-    with open("index.html", "r", encoding="utf-8") as f:
-        return HTMLResponse(f.read())
-
-# Эндпоинт для скачивания картинки через наш сервер (обходим CORS)
-@app.get("/proxy-image")
-async def proxy_image(url: str):
-    try:
-        response = requests.get(url, timeout=15)
-        return Response(content=response.content, media_type="image/jpeg")
-    except Exception as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
-
-# Загрузка CSV
-@app.post("/upload")
-async def upload_csv(file: UploadFile = File(...)):
-    global current_data
-    content = await file.read()
-    
-    # Парсим CSV
-    try:
-        df = pd.read_csv(io.BytesIO(content))
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": f"Ошибка чтения CSV: {str(e)}"})
-    
-    current_data = []
-    for idx, row in df.iterrows():
-        # Определяем колонки автоматически (file, url или картинки)
-        url_col = 'test' if 'test' in df.columns else df.columns[0]
-        label_col = 'label' if 'label' in df.columns else df.columns[1]
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>💰 Верификация цен (3800+ фото)</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #e4e6eb; padding: 15px; }
+        .container { max-width: 1600px; margin: 0 auto; }
         
-        current_data.append({
-            "id": idx,
-            "url": str(row[url_col]),
-            "label": str(row[label_col]),
-            "edited": str(row[label_col])
-        })
+        h1 { font-size: 20px; margin-bottom: 6px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        h1 small { font-weight: 400; font-size: 13px; color: #888; }
+        
+        .stats { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0 14px; font-size: 13px; }
+        .stats span { background: #1e2128; padding: 4px 12px; border-radius: 6px; border: 1px solid #2a2d36; }
+        .stats .badge { background: #2d8a4e; border-color: #3ba363; }
+        .stats .badge.warn { background: #8a6d2d; border-color: #c99a3b; }
+        
+        .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
+        .toolbar input[type="text"], .toolbar select, .toolbar button, .file-upload-btn {
+            padding: 7px 12px; border-radius: 6px; border: 1px solid #2a2d36;
+            background: #1a1d24; color: #e4e6eb; font-size: 13px; display: inline-flex; align-items: center; cursor: pointer;
+        }
+        .toolbar button { background: #2d8a4e; border-color: #3ba363; font-weight: 600; }
+        .toolbar button:hover { background: #3ba363; }
+        .toolbar button.danger { background: #7a2d2d; border-color: #b33b3b; }
+        .toolbar button.danger:hover { background: #9a3b3b; }
+        .toolbar button.secondary { background: #2a2d36; border-color: #3a3d46; }
+        .toolbar button.secondary:hover { background: #3a3d46; }
+        .file-upload-btn { background: #3b5998; border-color: #4c6ef5; font-weight: 600; }
+        .file-upload-btn:hover { background: #4c6ef5; }
+        input[type="file"] { display: none; }
+
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+        
+        .card {
+            background: #1a1d24; border-radius: 8px; border: 1px solid #2a2d36;
+            overflow: hidden; transition: border-color 0.2s, box-shadow 0.2s;
+            display: flex; flex-direction: column; padding: 8px; gap: 6px;
+        }
+        .card:hover { border-color: #3a3d46; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+        
+        .card.changed { 
+            border-color: #f3c763 !important; 
+            box-shadow: 0 0 0 2px rgba(243,199,99,0.3); 
+            background: #231f14 !important;
+        }
+        
+        .card .img-wrap {
+            position: relative; background: #07090d; display: flex; align-items: center; justify-content: center;
+            height: 210px; width: 100%; overflow: hidden; border-radius: 6px; border: 1px solid #2a2d36; cursor: zoom-in;
+        }
+        .card .img-wrap img { 
+            width: 100%; height: 100%; object-fit: contain; 
+            image-rendering: pixelated; image-rendering: crisp-edges;
+        }
+        .card .img-wrap .badge-idx { position: absolute; top: 4px; left: 6px; background: rgba(0,0,0,0.8); padding: 1px 6px; border-radius: 4px; font-size: 10px; color: #aaa; z-index: 2; }
+        .card .img-wrap .badge-edited { position: absolute; top: 4px; right: 6px; background: #f3c763; color: #000; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; z-index: 2; display: none; }
+        .card.changed .img-wrap .badge-edited { display: block; }
+        
+        .card .info { display: flex; flex-direction: column; gap: 4px; }
+        .card .info .filename { font-size: 10px; color: #777; word-break: break-all; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        
+        .control-row {
+            display: flex; align-items: center; gap: 6px; background: #0f1117;
+            padding: 4px; border-radius: 6px; border: 1px solid #2a2d36;
+        }
+        .control-row input {
+            width: 75px; padding: 4px; border-radius: 4px; border: 1px solid #2a2d36;
+            background: #1a1d24; color: #e4e6eb; font-size: 18px; font-weight: 700; font-family: monospace;
+            text-align: center;
+        }
+        .control-row input:focus { outline: none; border-color: #3ba363; }
+        .control-row input.changed-input { border-color: #f3c763 !important; background: #2f2714 !important; color: #f3c763 !important; }
+
+        .card .actions { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+        .card .actions button { width: 100%; border-radius: 4px; border: none; cursor: pointer; font-weight: 600; padding: 5px; transition: 0.2s; font-size: 11px; }
+        .card .actions button.save-one { background: #2d8a4e; color: #fff; }
+        .card .actions button.save-one:hover { background: #3ba363; }
+        .card .actions button.reset-one { background: #2a2d36; color: #888; font-size: 10px; padding: 2px; }
+        .card .actions button.reset-one:hover { background: #3a3d46; color: #ccc; }
+        
+        .pagination { display: flex; justify-content: center; align-items: center; gap: 10px; margin: 15px 0; }
+        .pagination button { background: #1a1d24; color: #e4e6eb; border: 1px solid #2a2d36; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+        .pagination button:hover { background: #2a2d36; }
+        .pagination span { color: #888; font-size: 13px; }
+
+        .toast { position: fixed; bottom: 25px; left: 50%; transform: translateX(-50%); background: #2d8a4e; color: #fff; padding: 10px 24px; border-radius: 10px; font-weight: 500; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,0.6); display: none; z-index: 999; }
+        .toast.error { background: #7a2d2d; }
+        
+        .modal { 
+            position: fixed; inset: 0; background: rgba(0,0,0,0.94); display: none; 
+            flex-direction: column; align-items: center; justify-content: center; z-index: 1000; 
+            user-select: none;
+        }
+        .modal-header {
+            position: absolute; top: 15px; left: 20px; right: 20px; display: flex; 
+            justify-content: space-between; align-items: center; z-index: 1010; pointer-events: none;
+        }
+        .modal-title { font-size: 14px; color: #ccc; background: rgba(0,0,0,0.7); padding: 5px 12px; border-radius: 6px; border: 1px solid #333; pointer-events: auto; }
+        .modal-close { background: #7a2d2d; color: #fff; border: none; padding: 5px 14px; border-radius: 6px; cursor: pointer; font-weight: bold; pointer-events: auto; }
+        .modal-close:hover { background: #9a3b3b; }
+
+        .modal-content-wrap {
+            position: relative; width: 95vw; height: 80vh;
+            overflow: auto; border: 1px solid #333; border-radius: 10px; background: #000; cursor: grab;
+        }
+        .modal-content-wrap:active { cursor: grabbing; }
+
+        .filter-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(260px, 1fr));
+            gap: 16px;
+            padding: 24px;
+            width: max-content;
+            transform-origin: top left;
+        }
+        .filter-panel {
+            display: flex; flex-direction: column; align-items: center; gap: 6px;
+        }
+        .filter-panel .panel-label {
+            font-size: 12px; color: #ccc; background: rgba(0,0,0,0.7);
+            padding: 3px 10px; border-radius: 5px; border: 1px solid #333; white-space: nowrap;
+        }
+        .filter-panel canvas {
+            width: 280px; height: auto; display: block;
+            image-rendering: pixelated; image-rendering: crisp-edges;
+            border: 1px solid #2a2d36; border-radius: 6px; background: #111;
+        }
+        
+        .modal-filters {
+            display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; justify-content: center; z-index: 1010;
+        }
+        .modal-filters button {
+            background: #1a1d24; color: #ccc; border: 1px solid #333; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px;
+        }
+        .modal-filters button:hover { background: #3b5998; color: #fff; border-color: #4c6ef5; }
+
+        .welcome-screen { display: flex; flex-direction: column; align-items: center; justify-content: center; grid-column: 1 / -1; padding: 50px; text-align: center; color: #888; gap: 12px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>
+        💰 Верификация цен из CSV (3800+ фото)
+        <small id="fileInfo">📄 Записей: 0</small>
+    </h1>
     
-    return {"message": f"Загружено {len(current_data)} строк"}
+    <div class="stats" id="stats">
+        <span>📁 Всего: <b id="totalCount">0</b></span>
+        <span>🖼️ С фото: <b id="withImgCount">0</b></span>
+        <span>✏️ Изменено: <b id="changedCount">0</b></span>
+        <span class="badge">✅ Совпадает: <b id="matchCount">0</b></span>
+        <span class="badge warn">⚠️ Отличается: <b id="mismatchCount">0</b></span>
+    </div>
+    
+    <div class="toolbar">
+        <label class="file-upload-btn">
+            📂 Загрузить CSV <input type="file" id="csvFileInput" accept=".csv" onchange="handleFileSelect(event)">
+        </label>
+        <button onclick="saveAll()">💾 Сохранить все</button>
+        <button class="danger" onclick="resetAll()">↩️ Сбросить</button>
+        <button class="secondary" onclick="exportCSV()">📥 Экспорт CSV</button>
+        
+        <input type="text" id="searchInput" placeholder="🔍 Поиск..." oninput="currentPage=1; renderCards()" style="flex:1;min-width:120px;" />
+        <select id="filterSelect" onchange="currentPage=1; renderCards()">
+            <option value="all">Все записи</option>
+            <option value="with_img">🖼️ Только с фото</option>
+            <option value="mismatch">⚠️ Только отличия</option>
+            <option value="changed">✏️ Измененные</option>
+        </select>
+    </div>
+    
+    <div id="gridContainer" class="grid">
+        <div class="welcome-screen">
+            <h2>👈 Загрузите ваш CSV-файл с ценами и фото</h2>
+            <p>Карточки станут компактными, а фотографии займут максимум пространства.</p>
+        </div>
+    </div>
 
-# Получить все данные
-@app.get("/api/data")
-async def get_data():
-    return current_data
+    <div class="pagination" id="paginationControls" style="display:none;">
+        <button onclick="changePage(-1)">◀ Назад</button>
+        <span id="pageInfo">Страница 1 из 1</span>
+        <button onclick="changePage(1)">Вперед ▶</button>
+    </div>
+</div>
 
-# Сохранить исправленные данные
-@app.post("/api/save")
-async def save_data(new_data: list):
-    global current_data
-    current_data = new_data
-    return {"message": "Данные сохранены"}
+<div class="modal" id="imageModal">
+    <div class="modal-header">
+        <div class="modal-title" id="modalTitle">Просмотр фото</div>
+        <button class="modal-close" onclick="closeModal()">✕ Закрыть</button>
+    </div>
+    <div class="modal-content-wrap" id="modalWrap" onwheel="handleModalZoom(event)">
+        <div class="filter-grid" id="filterGrid"></div>
+    </div>
+    <div class="modal-filters">
+        <button onclick="resetZoom()">🔍 Сбросить зум</button>
+    </div>
+</div>
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+<div id="toast" class="toast"></div>
+
+<script>
+let csvHeaders = [];
+let rawRows = []; 
+let allData = [];    
+let originalData = [];
+let changedIndices = new Set();
+let currentPage = 1;
+const pageSize = 60;
+
+let scale = 1, panX = 0, panY = 0;
+let isDragging = false, startX = 0, startY = 0;
+let currentImage = null;
+
+// ФИЛЬТРЫ (обрабатываются на Canvas)
+const FILTERS = [
+    { key: 'original',         label: 'Оригинал' },
+    { key: 'contrast',         label: 'Сильный контраст' },
+    { key: 'rb',               label: 'R-B разница' },
+    { key: 'median_stretch',   label: 'Median + Stretch' },
+    { key: 'invert_contrast',  label: 'Инверсия + контраст' },
+    { key: 'max_readable',     label: 'Макс. читаемость' },
+];
+
+// !!! ВАЖНО: Загрузка CSV через сервер !!!
+async function handleFileSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await fetch('/upload', { method: 'POST', body: formData });
+    const result = await response.json();
+    if (result.error) {
+        showToast('❌ ' + result.error, false);
+        return;
+    }
+    
+    // Загружаем данные с сервера
+    const dataResponse = await fetch('/api/data');
+    allData = await dataResponse.json();
+    
+    originalData = JSON.parse(JSON.stringify(allData));
+    changedIndices.clear();
+    currentPage = 1;
+    document.getElementById('fileInfo').textContent = `📄 Всего строк: ${allData.length}`;
+    showToast(`📁 Загружено записей: ${allData.length}`);
+    renderCards();
+}
+
+function renderCards() {
+    const container = document.getElementById('gridContainer');
+    const pagination = document.getElementById('paginationControls');
+    
+    if (allData.length === 0) return;
+    
+    let matchCount = 0, mismatchCount = 0, withImgCount = 0;
+    allData.forEach((row, idx) => {
+        if (String(row.label) === String(originalData[idx]?.label)) matchCount++;
+        else mismatchCount++;
+        if (row.url && row.url.length > 3) withImgCount++;
+    });
+
+    document.getElementById('totalCount').textContent = allData.length;
+    document.getElementById('withImgCount').textContent = withImgCount;
+    document.getElementById('changedCount').textContent = changedIndices.size;
+    document.getElementById('matchCount').textContent = matchCount;
+    document.getElementById('mismatchCount').textContent = mismatchCount;
+
+    const filteredIndices = getFilteredIndices();
+    const totalPages = Math.ceil(filteredIndices.length / pageSize) || 1;
+    if (currentPage > totalPages) currentPage = totalPages;
+    
+    const start = (currentPage - 1) * pageSize;
+    const pageIndices = filteredIndices.slice(start, start + pageSize);
+    
+    let html = '';
+    if (pageIndices.length === 0) {
+        html = `<div style="grid-column: 1/-1; text-align:center; padding: 40px; color: #888;">Ничего не найдено</div>`;
+    } else {
+        pageIndices.forEach(idx => {
+            const row = allData[idx];
+            const imgSrc = row.url || '';
+            const currentLabel = row.label || '';
+            const isChanged = changedIndices.has(idx);
+            const cardClass = `card ${isChanged ? 'changed' : ''}`;
+            
+            let imgBlock = '';
+            if (imgSrc && imgSrc.length > 3) {
+                // ВСЕГДА идем через /proxy-image
+                const safeSrc = '/proxy-image?url=' + encodeURIComponent(imgSrc);
+                imgBlock = `
+                <div class="img-wrap" onclick="openModal('${safeSrc}', 'Строка #${idx+1}')">
+                    <img src="${safeSrc}" loading="lazy" onerror="this.onerror=null; this.alt='⚠️ Ошибка фото';" />
+                    <span class="badge-idx">#${idx+1}</span>
+                    <span class="badge-edited">✏️ изм.</span>
+                </div>`;
+            } else {
+                imgBlock = `
+                <div class="img-wrap" style="background: #12151c; cursor: default;">
+                    <span style="color: #444; font-size: 10px;">Нет фото</span>
+                    <span class="badge-idx">#${idx+1}</span>
+                </div>`;
+            }
+            
+            html += `
+            <div class="${cardClass}" id="card-${idx}">
+                ${imgBlock}
+                <div class="info">
+                    <div class="filename" title="${imgSrc}">${imgSrc || '(нет пути)'}</div>
+                    <div class="control-row">
+                        <input type="text" maxlength="6" class="${isChanged ? 'changed-input' : ''}" value="${currentLabel}" 
+                               oninput="updateValue(${idx}, this.value)" />
+                        <div class="actions">
+                            <button class="save-one" onclick="showToast('✅ Строка #${idx+1} зафиксирована')">Ок</button>
+                            <button class="reset-one" onclick="resetOne(${idx})">Сброс</button>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+        });
+    }
+    
+    container.innerHTML = html;
+    
+    if (filteredIndices.length > pageSize) {
+        pagination.style.display = 'flex';
+        document.getElementById('pageInfo').textContent = `Страница ${currentPage} из ${totalPages} (Найдено: ${filteredIndices.length})`;
+    } else {
+        pagination.style.display = 'none';
+    }
+}
+
+function getFilteredIndices() {
+    const search = document.getElementById('searchInput').value.toLowerCase();
+    const filter = document.getElementById('filterSelect').value;
+    
+    let filtered = [];
+    for (let i = 0; i < allData.length; i++) {
+        const row = allData[i];
+        const imgSrc = row.url || '';
+        const currentLabel = row.label || '';
+        const origLabel = originalData[i]?.label || '';
+        
+        const isMatch = String(currentLabel) === String(origLabel);
+        const hasImg = imgSrc.length > 3;
+        const isChanged = changedIndices.has(i);
+        
+        if (search && !imgSrc.toLowerCase().includes(search) && !currentLabel.toLowerCase().includes(search)) continue;
+        if (filter === 'with_img' && !hasImg) continue;
+        if (filter === 'mismatch' && isMatch) continue;
+        if (filter === 'changed' && !isChanged) continue;
+        
+        filtered.push(i);
+    }
+    return filtered;
+}
+
+function changePage(delta) {
+    const filteredIndices = getFilteredIndices();
+    const totalPages = Math.ceil(filteredIndices.length / pageSize) || 1;
+    currentPage += delta;
+    if (currentPage < 1) currentPage = 1;
+    if (currentPage > totalPages) currentPage = totalPages;
+    renderCards();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function updateValue(idx, val) {
+    allData[idx].label = val.trim();
+    if (String(allData[idx].label) !== String(originalData[idx].label)) {
+        changedIndices.add(idx);
+    } else {
+        changedIndices.delete(idx);
+    }
+    document.getElementById('changedCount').textContent = changedIndices.size;
+    
+    const card = document.getElementById(`card-${idx}`);
+    if (card) {
+        const isChanged = changedIndices.has(idx);
+        card.classList.toggle('changed', isChanged);
+        const input = card.querySelector('input');
+        input.classList.toggle('changed-input', isChanged);
+    }
+}
+
+function resetOne(idx) {
+    allData[idx].label = originalData[idx].label;
+    changedIndices.delete(idx);
+    renderCards();
+}
+
+function saveAll() {
+    if (changedIndices.size === 0) {
+        showToast('ℹ️ Нет измененных данных', false);
+        return;
+    }
+    showToast(`💾 Зафиксировано изменений: ${changedIndices.size}`);
+}
+
+function resetAll() {
+    if (!confirm('Сбросить все изменения?')) return;
+    allData = JSON.parse(JSON.stringify(originalData));
+    changedIndices.clear();
+    showToast('↩️ Все изменения сброшены', false);
+    renderCards();
+}
+
+// !!! ВАЖНО: Экспорт через сервер !!!
+async function exportCSV() {
+    if (allData.length === 0) {
+        showToast('❌ Нет данных для экспорта', false);
+        return;
+    }
+    const response = await fetch('/api/save', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(allData)
+    });
+    const result = await response.json();
+    
+    if (result.error) {
+        showToast('❌ ' + result.error, false);
+        return;
+    }
+    
+    // Сервер должен вернуть готовый CSV файл
+    const csvResponse = await fetch('/download-csv');
+    const blob = await csvResponse.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'updated_prices.csv';
+    link.click();
+    showToast('📥 Экспортирован новый CSV-файл');
+}
+
+// ====================== МОДАЛКА: РЕАЛЬНАЯ ОБРАБОТКА ПИКСЕЛЕЙ ======================
+const modal = document.getElementById('imageModal');
+const modalWrap = document.getElementById('modalWrap');
+const filterGrid = document.getElementById('filterGrid');
+
+function openModal(src, titleText) {
+    document.getElementById('modalTitle').textContent = titleText;
+    modal.style.display = 'flex';
+    filterGrid.innerHTML = '<div style="color:#888; padding:40px; grid-column:1/-1;">Загрузка…</div>';
+    
+    currentImage = new Image();
+    currentImage.onload = () => {
+        buildFilterGrid();
+        scale = 1;
+        panX = 0;
+        panY = 0;
+        updateTransform();
+    };
+    currentImage.onerror = () => {
+        filterGrid.innerHTML = '<div style="color:#e07a7a; padding:40px; grid-column:1/-1;">⚠️ Не удалось загрузить фото по этому пути.</div>';
+    };
+    // Всегда грузим через сервер, чтобы Canvas мог читать пиксели
+    currentImage.src = '/proxy-image?url=' + encodeURIComponent(src);
+}
+
+function closeModal() {
+    modal.style.display = 'none';
+}
+
+function resetZoom() {
+    scale = 1;
+    panX = 0;
+    panY = 0;
+    updateTransform();
+}
+
+function buildFilterGrid() {
+    filterGrid.innerHTML = '';
+    const w = currentImage.naturalWidth;
+    const h = currentImage.naturalHeight;
+    
+    FILTERS.forEach(f => {
+        const panel = document.createElement('div');
+        panel.className = 'filter-panel';
+        
+        const label = document.createElement('div');
+        label.className = 'panel-label';
+        label.textContent = f.label;
+        
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        
+        const cctx = canvas.getContext('2d');
+        cctx.drawImage(currentImage, 0, 0, w, h);
+        
+        try {
+            const imageData = cctx.getImageData(0, 0, w, h);
+            applyFilterToData(f.key, imageData.data);
+            cctx.putImageData(imageData, 0, 0);
+        } catch (err) {
+            label.textContent = f.label + ' — CORS заблокировал';
+            cctx.fillStyle = 'rgba(122,45,45,0.55)';
+            cctx.fillRect(0, 0, w, h);
+            cctx.fillStyle = '#fff';
+            cctx.font = `bold ${Math.max(14, Math.floor(w/14))}px sans-serif`;
+            cctx.textAlign = 'center';
+            cctx.fillText('CORS: пиксели недоступны', w/2, h/2);
+        }
+        
+        panel.appendChild(label);
+        panel.appendChild(canvas);
+        filterGrid.appendChild(panel);
+    });
+}
+
+function applyFilterToData(type, data) {
+    if (type === 'contrast') {
+        for (let i = 0; i < data.length; i += 4) {
+            for (let c = 0; c < 3; c++) {
+                let val = data[i + c];
+                val = (val - 128) * 2.8 + 128 - 25;
+                data[i + c] = Math.max(0, Math.min(255, val));
+            }
+        }
+    }
+    else if (type === 'rb') {
+        for (let i = 0; i < data.length; i += 4) {
+            const r = data[i];
+            const b = data[i + 2];
+            let val = (r - b) * 3 + 128;
+            val = Math.max(0, Math.min(255, val));
+            data[i] = data[i+1] = data[i+2] = val;
+        }
+    }
+    else if (type === 'median_stretch') {
+        for (let i = 0; i < data.length; i += 4) {
+            let gray = data[i] * 0.4 + data[i+1] * 0.4 + data[i+2] * 0.2;
+            gray = (gray - 180) * 4.5;
+            gray = Math.max(0, Math.min(255, gray));
+            data[i] = data[i+1] = data[i+2] = gray;
+        }
+    }
+    else if (type === 'invert_contrast') {
+        for (let i = 0; i < data.length; i += 4) {
+            for (let c = 0; c < 3; c++) {
+                let val = 255 - data[i + c];
+                val = (val - 128) * 2.2 + 128;
+                data[i + c] = Math.max(0, Math.min(255, val));
+            }
+        }
+    }
+    else if (type === 'max_readable') {
+        for (let i = 0; i < data.length; i += 4) {
+            const r = data[i];
+            const g = data[i+1];
+            const b = data[i+2];
+            let val = (r - b) * 2.8 + (r - g) * 0.6;
+            val = (val - 10) * 1.8 + 90;
+            val = Math.max(0, Math.min(255, val));
+            data[i] = data[i+1] = data[i+2] = val;
+        }
+    }
+}
+
+function handleModalZoom(e) {
+    e.preventDefault();
+    const zoomIntensity = 0.12;
+    if (e.deltaY < 0) scale *= (1 + zoomIntensity);
+    else scale /= (1 + zoomIntensity);
+    scale = Math.max(0.3, Math.min(scale, 30)); 
+    updateTransform();
+}
+
+function updateTransform() {
+    filterGrid.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+}
+
+modalWrap.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    startX = e.clientX - panX;
+    startY = e.clientY - panY;
+});
+
+window.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    panX = e.clientX - startX;
+    panY = e.clientY - startY;
+    updateTransform();
+});
+
+window.addEventListener('mouseup', () => { isDragging = false; });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+function showToast(msg, success = true) {
+    const toast = document.getElementById('toast');
+    toast.textContent = msg;
+    toast.className = 'toast' + (success ? '' : ' error');
+    toast.style.display = 'block';
+    clearTimeout(toast._timer);
+    toast._timer = setTimeout(() => { toast.style.display = 'none'; }, 2500);
+}
+</script>
+</body>
+</html>
