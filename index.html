@@ -290,11 +290,10 @@ function renderCards() {
             
             let imgBlock = '';
             if (imgSrc && imgSrc.length > 3) {
-                // ВСЕГДА идем через /proxy-image
-                const safeSrc = '/proxy-image?url=' + encodeURIComponent(imgSrc);
+                // В КАРТОЧКЕ ИСПОЛЬЗУЕМ ПРОКСИ ДЛЯ ПОКАЗА, НО В openModal ПЕРЕДАЕМ ОРИГИНАЛЬНУЮ ССЫЛКУ
                 imgBlock = `
-                <div class="img-wrap" onclick="openModal('${safeSrc}', 'Строка #${idx+1}')">
-                    <img src="${safeSrc}" loading="lazy" onerror="this.onerror=null; this.alt='⚠️ Ошибка фото';" />
+                <div class="img-wrap" onclick="openModal('${imgSrc}', 'Строка #${idx+1}')">
+                    <img src="/proxy-image?url=${encodeURIComponent(imgSrc)}" loading="lazy" onerror="this.onerror=null; this.alt='⚠️ Ошибка фото';" />
                     <span class="badge-idx">#${idx+1}</span>
                     <span class="badge-edited">✏️ изм.</span>
                 </div>`;
@@ -458,7 +457,7 @@ function openModal(src, titleText) {
     currentImage.onerror = () => {
         filterGrid.innerHTML = '<div style="color:#e07a7a; padding:40px; grid-column:1/-1;">⚠️ Не удалось загрузить фото по этому пути.</div>';
     };
-    // Всегда грузим через сервер, чтобы Canvas мог читать пиксели
+    // ВСЕГДА ГРУЗИМ ЧЕРЕЗ /proxy-image, НО ПЕРЕДАЕМ ОРИГИНАЛЬНУЮ ССЫЛКУ
     currentImage.src = '/proxy-image?url=' + encodeURIComponent(src);
 }
 
