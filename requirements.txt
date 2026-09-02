@@ -1,7 +1,5 @@
 fastapi
 uvicorn
 pandas
-opencv-python-headless
-pytesseract
-numpy
-Pillow
+requests
+python-multipart
