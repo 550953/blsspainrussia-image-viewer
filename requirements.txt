@@ -3,3 +3,6 @@ uvicorn
 pandas
 requests
 python-multipart
+numpy
+opencv-python-headless
+Pillow
