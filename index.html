@@ -110,7 +110,7 @@
 
         .filter-grid {
             display: grid;
-            grid-template-columns: repeat(3, minmax(260px, 1fr));
+            grid-template-columns: repeat(4, minmax(230px, 1fr));
             gap: 16px;
             padding: 24px;
             width: max-content;
@@ -123,7 +123,7 @@
             font-size: 12px; color: #ccc; background: rgba(0,0,0,0.7);
             padding: 3px 10px; border-radius: 5px; border: 1px solid #333; white-space: nowrap;
         }
-        .filter-panel canvas {
+        .filter-panel canvas, .filter-panel img {
             width: 280px; height: auto; display: block;
             image-rendering: pixelated; image-rendering: crisp-edges;
             border: 1px solid #2a2d36; border-radius: 6px; background: #111;
@@ -212,17 +212,7 @@ const pageSize = 60;
 
 let scale = 1, panX = 0, panY = 0;
 let isDragging = false, startX = 0, startY = 0;
-let currentImage = null;
-
-// ФИЛЬТРЫ (обрабатываются на Canvas)
-const FILTERS = [
-    { key: 'original',         label: 'Оригинал' },
-    { key: 'contrast',         label: 'Сильный контраст' },
-    { key: 'rb',               label: 'R-B разница' },
-    { key: 'median_stretch',   label: 'Median + Stretch' },
-    { key: 'invert_contrast',  label: 'Инверсия + контраст' },
-    { key: 'max_readable',     label: 'Макс. читаемость' },
-];
+let currentImageSrc = null;
 
 // !!! ВАЖНО: Загрузка CSV через сервер !!!
 async function handleFileSelect(event) {
@@ -290,7 +280,6 @@ function renderCards() {
             
             let imgBlock = '';
             if (imgSrc && imgSrc.length > 3) {
-                // В КАРТОЧКЕ ИСПОЛЬЗУЕМ ПРОКСИ ДЛЯ ПОКАЗА, НО В openModal ПЕРЕДАЕМ ОРИГИНАЛЬНУЮ ССЫЛКУ
                 imgBlock = `
                 <div class="img-wrap" onclick="openModal('${imgSrc}', 'Строка #${idx+1}')">
                     <img src="/proxy-image?url=${encodeURIComponent(imgSrc)}" loading="lazy" onerror="this.onerror=null; this.alt='⚠️ Ошибка фото';" />
@@ -426,7 +415,6 @@ async function exportCSV() {
         return;
     }
     
-    // Сервер должен вернуть готовый CSV файл
     const csvResponse = await fetch('/download-csv');
     const blob = await csvResponse.blob();
     const link = document.createElement('a');
@@ -436,29 +424,57 @@ async function exportCSV() {
     showToast('📥 Экспортирован новый CSV-файл');
 }
 
-// ====================== МОДАЛКА: РЕАЛЬНАЯ ОБРАБОТКА ПИКСЕЛЕЙ ======================
+// ====================== МОДАЛКА: ФИЛЬТРЫ С СЕРВЕРА ======================
 const modal = document.getElementById('imageModal');
 const modalWrap = document.getElementById('modalWrap');
 const filterGrid = document.getElementById('filterGrid');
 
-function openModal(src, titleText) {
+async function openModal(src, titleText) {
+    currentImageSrc = src;
     document.getElementById('modalTitle').textContent = titleText;
     modal.style.display = 'flex';
-    filterGrid.innerHTML = '<div style="color:#888; padding:40px; grid-column:1/-1;">Загрузка…</div>';
-    
-    currentImage = new Image();
-    currentImage.onload = () => {
-        buildFilterGrid();
-        scale = 1;
-        panX = 0;
-        panY = 0;
-        updateTransform();
-    };
-    currentImage.onerror = () => {
-        filterGrid.innerHTML = '<div style="color:#e07a7a; padding:40px; grid-column:1/-1;">⚠️ Не удалось загрузить фото по этому пути.</div>';
-    };
-    // ВСЕГДА ГРУЗИМ ЧЕРЕЗ /proxy-image, НО ПЕРЕДАЕМ ОРИГИНАЛЬНУЮ ССЫЛКУ
-    currentImage.src = '/proxy-image?url=' + encodeURIComponent(src);
+    filterGrid.innerHTML = '<div style="color:#888; padding:40px; grid-column:1/-1;">Обрабатываю варианты на сервере…</div>';
+    scale = 1; panX = 0; panY = 0;
+    updateTransform();
+
+    try {
+        const resp = await fetch('/proxy-filters?url=' + encodeURIComponent(src));
+        const data = await resp.json();
+        if (data.error) {
+            filterGrid.innerHTML = `<div style="color:#e07a7a; padding:40px; grid-column:1/-1;">⚠️ ${data.error}</div>`;
+            return;
+        }
+        renderFilterGrid(data.filters);
+    } catch (err) {
+        filterGrid.innerHTML = `<div style="color:#e07a7a; padding:40px; grid-column:1/-1;">⚠️ Ошибка запроса: ${err}</div>`;
+    }
+}
+
+function renderFilterGrid(filters) {
+    filterGrid.innerHTML = '';
+    filters.forEach(f => {
+        const panel = document.createElement('div');
+        panel.className = 'filter-panel';
+
+        const label = document.createElement('div');
+        label.className = 'panel-label';
+        label.textContent = f.label;
+        panel.appendChild(label);
+
+        if (f.image) {
+            const img = document.createElement('img');
+            img.src = f.image;
+            img.alt = f.label;
+            panel.appendChild(img);
+        } else {
+            const errBox = document.createElement('div');
+            errBox.style.cssText = 'width:280px;height:140px;display:flex;align-items:center;justify-content:center;background:#2a1414;color:#e07a7a;font-size:12px;border-radius:6px;border:1px solid #2a2d36;';
+            errBox.textContent = 'Ошибка обработки';
+            panel.appendChild(errBox);
+        }
+
+        filterGrid.appendChild(panel);
+    });
 }
 
 function closeModal() {
@@ -470,95 +486,6 @@ function resetZoom() {
     panX = 0;
     panY = 0;
     updateTransform();
-}
-
-function buildFilterGrid() {
-    filterGrid.innerHTML = '';
-    const w = currentImage.naturalWidth;
-    const h = currentImage.naturalHeight;
-    
-    FILTERS.forEach(f => {
-        const panel = document.createElement('div');
-        panel.className = 'filter-panel';
-        
-        const label = document.createElement('div');
-        label.className = 'panel-label';
-        label.textContent = f.label;
-        
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        
-        const cctx = canvas.getContext('2d');
-        cctx.drawImage(currentImage, 0, 0, w, h);
-        
-        try {
-            const imageData = cctx.getImageData(0, 0, w, h);
-            applyFilterToData(f.key, imageData.data);
-            cctx.putImageData(imageData, 0, 0);
-        } catch (err) {
-            label.textContent = f.label + ' — CORS заблокировал';
-            cctx.fillStyle = 'rgba(122,45,45,0.55)';
-            cctx.fillRect(0, 0, w, h);
-            cctx.fillStyle = '#fff';
-            cctx.font = `bold ${Math.max(14, Math.floor(w/14))}px sans-serif`;
-            cctx.textAlign = 'center';
-            cctx.fillText('CORS: пиксели недоступны', w/2, h/2);
-        }
-        
-        panel.appendChild(label);
-        panel.appendChild(canvas);
-        filterGrid.appendChild(panel);
-    });
-}
-
-function applyFilterToData(type, data) {
-    if (type === 'contrast') {
-        for (let i = 0; i < data.length; i += 4) {
-            for (let c = 0; c < 3; c++) {
-                let val = data[i + c];
-                val = (val - 128) * 2.8 + 128 - 25;
-                data[i + c] = Math.max(0, Math.min(255, val));
-            }
-        }
-    }
-    else if (type === 'rb') {
-        for (let i = 0; i < data.length; i += 4) {
-            const r = data[i];
-            const b = data[i + 2];
-            let val = (r - b) * 3 + 128;
-            val = Math.max(0, Math.min(255, val));
-            data[i] = data[i+1] = data[i+2] = val;
-        }
-    }
-    else if (type === 'median_stretch') {
-        for (let i = 0; i < data.length; i += 4) {
-            let gray = data[i] * 0.4 + data[i+1] * 0.4 + data[i+2] * 0.2;
-            gray = (gray - 180) * 4.5;
-            gray = Math.max(0, Math.min(255, gray));
-            data[i] = data[i+1] = data[i+2] = gray;
-        }
-    }
-    else if (type === 'invert_contrast') {
-        for (let i = 0; i < data.length; i += 4) {
-            for (let c = 0; c < 3; c++) {
-                let val = 255 - data[i + c];
-                val = (val - 128) * 2.2 + 128;
-                data[i + c] = Math.max(0, Math.min(255, val));
-            }
-        }
-    }
-    else if (type === 'max_readable') {
-        for (let i = 0; i < data.length; i += 4) {
-            const r = data[i];
-            const g = data[i+1];
-            const b = data[i+2];
-            let val = (r - b) * 2.8 + (r - g) * 0.6;
-            val = (val - 10) * 1.8 + 90;
-            val = Math.max(0, Math.min(255, val));
-            data[i] = data[i+1] = data[i+2] = val;
-        }
-    }
 }
 
 function handleModalZoom(e) {
