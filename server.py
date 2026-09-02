@@ -2,7 +2,7 @@ import os
 import io
 import requests
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import HTMLResponse, Response, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import uvicorn
@@ -31,7 +31,7 @@ async def index():
 @app.get("/proxy-image")
 async def proxy_image(url: str):
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=15)
         return Response(content=response.content, media_type="image/jpeg")
     except Exception as e:
         return JSONResponse(status_code=404, content={"error": str(e)})
@@ -43,15 +43,22 @@ async def upload_csv(file: UploadFile = File(...)):
     content = await file.read()
     
     # Парсим CSV
-    df = pd.read_csv(io.BytesIO(content))
+    try:
+        df = pd.read_csv(io.BytesIO(content))
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": f"Ошибка чтения CSV: {str(e)}"})
     
     current_data = []
     for idx, row in df.iterrows():
+        # Определяем колонки автоматически (file, url или картинки)
+        url_col = 'test' if 'test' in df.columns else df.columns[0]
+        label_col = 'label' if 'label' in df.columns else df.columns[1]
+        
         current_data.append({
             "id": idx,
-            "url": str(row['test']),
-            "label": str(row['label']),
-            "edited": str(row['label'])
+            "url": str(row[url_col]),
+            "label": str(row[label_col]),
+            "edited": str(row[label_col])
         })
     
     return {"message": f"Загружено {len(current_data)} строк"}
