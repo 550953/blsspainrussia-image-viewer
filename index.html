@@ -102,17 +102,12 @@
         .modal-close { background: #7a2d2d; color: #fff; border: none; padding: 5px 14px; border-radius: 6px; cursor: pointer; font-weight: bold; pointer-events: auto; }
         .modal-close:hover { background: #9a3b3b; }
 
-        /* Окно с сеткой всех вариаций сразу. overflow:auto — чтобы сетка,
-           не помещающаяся в экран, скроллилась, а не обрезалась. */
         .modal-content-wrap {
             position: relative; width: 95vw; height: 80vh;
             overflow: auto; border: 1px solid #333; border-radius: 10px; background: #000; cursor: grab;
         }
         .modal-content-wrap:active { cursor: grabbing; }
 
-        /* Общий контейнер-сетка для всех фильтров. Именно к нему применяется
-           единый pan/zoom transform — поэтому все вариации масштабируются
-           и двигаются синхронно, как один лист. */
         .filter-grid {
             display: grid;
             grid-template-columns: repeat(3, minmax(260px, 1fr));
@@ -191,7 +186,6 @@
     </div>
 </div>
 
-<!-- Модальное окно -->
 <div class="modal" id="imageModal">
     <div class="modal-header">
         <div class="modal-title" id="modalTitle">Просмотр фото</div>
@@ -210,120 +204,67 @@
 <script>
 let csvHeaders = [];
 let rawRows = []; 
-let data = [];    
+let allData = [];    
 let originalData = [];
 let changedIndices = new Set();
-
-let imgColIdx = 0;   
-let labelColIdx = 1; 
-
 let currentPage = 1;
 const pageSize = 60;
 
 let scale = 1, panX = 0, panY = 0;
 let isDragging = false, startX = 0, startY = 0;
+let currentImage = null;
 
-let currentImage = null; // Image object
+// ФИЛЬТРЫ (обрабатываются на Canvas)
+const FILTERS = [
+    { key: 'original',         label: 'Оригинал' },
+    { key: 'contrast',         label: 'Сильный контраст' },
+    { key: 'rb',               label: 'R-B разница' },
+    { key: 'median_stretch',   label: 'Median + Stretch' },
+    { key: 'invert_contrast',  label: 'Инверсия + контраст' },
+    { key: 'max_readable',     label: 'Макс. читаемость' },
+];
 
-function handleFileSelect(event) {
+// !!! ВАЖНО: Загрузка CSV через сервер !!!
+async function handleFileSelect(event) {
     const file = event.target.files[0];
     if (!file) return;
     
-    const reader = new FileReader();
-    reader.onload = function(e) {
-        parseCSV(e.target.result);
-        showToast(`📁 Загружено записей: ${data.length}`);
-    };
-    reader.readAsText(file, 'UTF-8');
-}
+    const formData = new FormData();
+    formData.append('file', file);
 
-function parseCSV(text) {
-    const lines = text.trim().split(/\r?\n/);
-    if (lines.length === 0) return;
-    
-    const firstLine = lines[0];
-    const delimiter = firstLine.includes(';') ? ';' : ',';
-    
-    csvHeaders = firstLine.split(delimiter).map(h => h.trim().replace(/^["']|["']$/g, ''));
-    
-    imgColIdx = 0;
-    labelColIdx = 1;
-    
-    csvHeaders.forEach((h, idx) => {
-        const lower = h.toLowerCase();
-        if (lower.includes('file') || lower.includes('url') || lower.includes('img') || lower.includes('link') || lower.includes('карти')) {
-            imgColIdx = idx;
-        }
-        if (lower.includes('label') || lower.includes('price') || lower.includes('цена') || lower.includes('цифр') || lower.includes('val')) {
-            labelColIdx = idx;
-        }
-    });
-
-    data = [];
-    rawRows = [];
-
-    for (let i = 1; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
-        
-        const values = line.split(delimiter).map(v => v.trim().replace(/^["']|["']$/g, ''));
-        rawRows.push(values);
-        
-        const imgVal = values[imgColIdx] || '';
-        const labelVal = values[labelColIdx] !== undefined ? values[labelColIdx] : '';
-        
-        data.push({
-            imgSrc: imgVal,
-            label: labelVal
-        });
+    const response = await fetch('/upload', { method: 'POST', body: formData });
+    const result = await response.json();
+    if (result.error) {
+        showToast('❌ ' + result.error, false);
+        return;
     }
     
-    originalData = JSON.parse(JSON.stringify(data));
+    // Загружаем данные с сервера
+    const dataResponse = await fetch('/api/data');
+    allData = await dataResponse.json();
+    
+    originalData = JSON.parse(JSON.stringify(allData));
     changedIndices.clear();
     currentPage = 1;
-    document.getElementById('fileInfo').textContent = `📄 Всего строк: ${data.length}`;
+    document.getElementById('fileInfo').textContent = `📄 Всего строк: ${allData.length}`;
+    showToast(`📁 Загружено записей: ${allData.length}`);
     renderCards();
-}
-
-function getFilteredIndices() {
-    const search = document.getElementById('searchInput').value.toLowerCase();
-    const filter = document.getElementById('filterSelect').value;
-    
-    let filtered = [];
-    for (let i = 0; i < data.length; i++) {
-        const row = data[i];
-        const imgSrc = row.imgSrc || '';
-        const currentLabel = row.label || '';
-        const origLabel = originalData[i]?.label || '';
-        
-        const isMatch = currentLabel === origLabel;
-        const hasImg = imgSrc.length > 3;
-        const isChanged = changedIndices.has(i);
-        
-        if (search && !imgSrc.toLowerCase().includes(search) && !currentLabel.toLowerCase().includes(search)) continue;
-        if (filter === 'with_img' && !hasImg) continue;
-        if (filter === 'mismatch' && isMatch) continue;
-        if (filter === 'changed' && !isChanged) continue;
-        
-        filtered.push(i);
-    }
-    return filtered;
 }
 
 function renderCards() {
     const container = document.getElementById('gridContainer');
     const pagination = document.getElementById('paginationControls');
     
-    if (data.length === 0) return;
+    if (allData.length === 0) return;
     
     let matchCount = 0, mismatchCount = 0, withImgCount = 0;
-    data.forEach((row, idx) => {
-        if (row.label === originalData[idx]?.label) matchCount++;
+    allData.forEach((row, idx) => {
+        if (String(row.label) === String(originalData[idx]?.label)) matchCount++;
         else mismatchCount++;
-        if (row.imgSrc && row.imgSrc.length > 3) withImgCount++;
+        if (row.url && row.url.length > 3) withImgCount++;
     });
 
-    document.getElementById('totalCount').textContent = data.length;
+    document.getElementById('totalCount').textContent = allData.length;
     document.getElementById('withImgCount').textContent = withImgCount;
     document.getElementById('changedCount').textContent = changedIndices.size;
     document.getElementById('matchCount').textContent = matchCount;
@@ -341,18 +282,19 @@ function renderCards() {
         html = `<div style="grid-column: 1/-1; text-align:center; padding: 40px; color: #888;">Ничего не найдено</div>`;
     } else {
         pageIndices.forEach(idx => {
-            const row = data[idx];
-            const imgSrc = row.imgSrc || '';
+            const row = allData[idx];
+            const imgSrc = row.url || '';
             const currentLabel = row.label || '';
             const isChanged = changedIndices.has(idx);
             const cardClass = `card ${isChanged ? 'changed' : ''}`;
             
             let imgBlock = '';
             if (imgSrc && imgSrc.length > 3) {
-                const safeSrc = imgSrc.replace(/"/g, '&quot;');
+                // ВСЕГДА идем через /proxy-image
+                const safeSrc = '/proxy-image?url=' + encodeURIComponent(imgSrc);
                 imgBlock = `
                 <div class="img-wrap" onclick="openModal('${safeSrc}', 'Строка #${idx+1}')">
-                    <img src="${safeSrc}" loading="lazy" onerror="this.onerror=null; this.parentNode.innerHTML='<span style=\\'color:#666;font-size:10px;\\'>⚠️ Ошибка фото</span>';" />
+                    <img src="${safeSrc}" loading="lazy" onerror="this.onerror=null; this.alt='⚠️ Ошибка фото';" />
                     <span class="badge-idx">#${idx+1}</span>
                     <span class="badge-edited">✏️ изм.</span>
                 </div>`;
@@ -392,6 +334,31 @@ function renderCards() {
     }
 }
 
+function getFilteredIndices() {
+    const search = document.getElementById('searchInput').value.toLowerCase();
+    const filter = document.getElementById('filterSelect').value;
+    
+    let filtered = [];
+    for (let i = 0; i < allData.length; i++) {
+        const row = allData[i];
+        const imgSrc = row.url || '';
+        const currentLabel = row.label || '';
+        const origLabel = originalData[i]?.label || '';
+        
+        const isMatch = String(currentLabel) === String(origLabel);
+        const hasImg = imgSrc.length > 3;
+        const isChanged = changedIndices.has(i);
+        
+        if (search && !imgSrc.toLowerCase().includes(search) && !currentLabel.toLowerCase().includes(search)) continue;
+        if (filter === 'with_img' && !hasImg) continue;
+        if (filter === 'mismatch' && isMatch) continue;
+        if (filter === 'changed' && !isChanged) continue;
+        
+        filtered.push(i);
+    }
+    return filtered;
+}
+
 function changePage(delta) {
     const filteredIndices = getFilteredIndices();
     const totalPages = Math.ceil(filteredIndices.length / pageSize) || 1;
@@ -403,8 +370,8 @@ function changePage(delta) {
 }
 
 function updateValue(idx, val) {
-    data[idx].label = val.trim();
-    if (data[idx].label !== originalData[idx].label) {
+    allData[idx].label = val.trim();
+    if (String(allData[idx].label) !== String(originalData[idx].label)) {
         changedIndices.add(idx);
     } else {
         changedIndices.delete(idx);
@@ -421,7 +388,7 @@ function updateValue(idx, val) {
 }
 
 function resetOne(idx) {
-    data[idx].label = originalData[idx].label;
+    allData[idx].label = originalData[idx].label;
     changedIndices.delete(idx);
     renderCards();
 }
@@ -436,25 +403,33 @@ function saveAll() {
 
 function resetAll() {
     if (!confirm('Сбросить все изменения?')) return;
-    data = JSON.parse(JSON.stringify(originalData));
+    allData = JSON.parse(JSON.stringify(originalData));
     changedIndices.clear();
     showToast('↩️ Все изменения сброшены', false);
     renderCards();
 }
 
-function exportCSV() {
-    if (data.length === 0) {
+// !!! ВАЖНО: Экспорт через сервер !!!
+async function exportCSV() {
+    if (allData.length === 0) {
         showToast('❌ Нет данных для экспорта', false);
         return;
     }
-    let csv = csvHeaders.join(',') + '\n';
-    data.forEach((row, idx) => {
-        let cols = [...rawRows[idx]];
-        cols[labelColIdx] = row.label;
-        csv += cols.map(c => `"${(c || '').replace(/"/g, '""')}"`).join(',') + '\n';
+    const response = await fetch('/api/save', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(allData)
     });
+    const result = await response.json();
     
-    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    if (result.error) {
+        showToast('❌ ' + result.error, false);
+        return;
+    }
+    
+    // Сервер должен вернуть готовый CSV файл
+    const csvResponse = await fetch('/download-csv');
+    const blob = await csvResponse.blob();
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.download = 'updated_prices.csv';
@@ -462,23 +437,10 @@ function exportCSV() {
     showToast('📥 Экспортирован новый CSV-файл');
 }
 
-// ====================== МОДАЛКА: СЕТКА ВСЕХ ВАРИАЦИЙ СРАЗУ ======================
-
+// ====================== МОДАЛКА: РЕАЛЬНАЯ ОБРАБОТКА ПИКСЕЛЕЙ ======================
 const modal = document.getElementById('imageModal');
 const modalWrap = document.getElementById('modalWrap');
 const filterGrid = document.getElementById('filterGrid');
-
-// Список вариаций обработки — каждая рисуется в своей карточке сетки.
-// Чтобы добавить/убрать вариацию, просто добавь/убери запись здесь
-// и (если нужно) соответствующую ветку в applyFilterToData().
-const FILTERS = [
-    { key: 'original',         label: 'Оригинал' },
-    { key: 'contrast',         label: 'Сильный контраст' },
-    { key: 'rb',               label: 'R-B разница' },
-    { key: 'median_stretch',   label: 'Median + Stretch' },
-    { key: 'invert_contrast',  label: 'Инверсия + контраст' },
-    { key: 'max_readable',     label: 'Макс. читаемость' },
-];
 
 function openModal(src, titleText) {
     document.getElementById('modalTitle').textContent = titleText;
@@ -486,10 +448,6 @@ function openModal(src, titleText) {
     filterGrid.innerHTML = '<div style="color:#888; padding:40px; grid-column:1/-1;">Загрузка…</div>';
     
     currentImage = new Image();
-    // crossOrigin НЕ ставим: для локальных фото (file:// или сервер без
-    // CORS-заголовков) это ломает саму загрузку картинки (уходит в onerror),
-    // а без CORS всё равно нельзя будет читать пиксели через getImageData —
-    // так что реального смысла в нём тут нет, только вред.
     currentImage.onload = () => {
         buildFilterGrid();
         scale = 1;
@@ -500,7 +458,8 @@ function openModal(src, titleText) {
     currentImage.onerror = () => {
         filterGrid.innerHTML = '<div style="color:#e07a7a; padding:40px; grid-column:1/-1;">⚠️ Не удалось загрузить фото по этому пути.</div>';
     };
-    currentImage.src = src;
+    // Всегда грузим через сервер, чтобы Canvas мог читать пиксели
+    currentImage.src = '/proxy-image?url=' + encodeURIComponent(src);
 }
 
 function closeModal() {
@@ -514,9 +473,6 @@ function resetZoom() {
     updateTransform();
 }
 
-// Строит сетку: на каждую вариацию — свой canvas, отрисованный один раз.
-// Дальше зум/пан двигает весь #filterGrid целиком, так что все карточки
-// увеличиваются и сдвигаются синхронно, как единый лист.
 function buildFilterGrid() {
     filterGrid.innerHTML = '';
     const w = currentImage.naturalWidth;
@@ -537,28 +493,18 @@ function buildFilterGrid() {
         const cctx = canvas.getContext('2d');
         cctx.drawImage(currentImage, 0, 0, w, h);
         
-        // try/catch — если конкретное фото всё же кросс-доменное и без
-        // CORS-заголовков (canvas "tainted"), getImageData бросит исключение.
-        // Тогда просто оставляем эту карточку как есть (оригинал без
-        // фильтра) вместо того, чтобы обрушить сборку всей сетки.
-        if (f.key !== 'original') {
-            try {
-                const imageData = cctx.getImageData(0, 0, w, h);
-                applyFilterToData(f.key, imageData.data);
-                cctx.putImageData(imageData, 0, 0);
-            } catch (err) {
-                // Canvas "tainted" (обычно из-за file:// или сервера без
-                // CORS-заголовков) — getImageData физически не может отдать
-                // пиксели. Рисуем это прямо поверх картинки, чтобы было
-                // видно сразу, а не гадать, почему плитка "как оригинал".
-                label.textContent = f.label + ' — CORS заблокировал';
-                cctx.fillStyle = 'rgba(122,45,45,0.55)';
-                cctx.fillRect(0, 0, w, h);
-                cctx.fillStyle = '#fff';
-                cctx.font = `bold ${Math.max(14, Math.floor(w/14))}px sans-serif`;
-                cctx.textAlign = 'center';
-                cctx.fillText('CORS: пиксели недоступны', w/2, h/2);
-            }
+        try {
+            const imageData = cctx.getImageData(0, 0, w, h);
+            applyFilterToData(f.key, imageData.data);
+            cctx.putImageData(imageData, 0, 0);
+        } catch (err) {
+            label.textContent = f.label + ' — CORS заблокировал';
+            cctx.fillStyle = 'rgba(122,45,45,0.55)';
+            cctx.fillRect(0, 0, w, h);
+            cctx.fillStyle = '#fff';
+            cctx.font = `bold ${Math.max(14, Math.floor(w/14))}px sans-serif`;
+            cctx.textAlign = 'center';
+            cctx.fillText('CORS: пиксели недоступны', w/2, h/2);
         }
         
         panel.appendChild(label);
@@ -567,10 +513,8 @@ function buildFilterGrid() {
     });
 }
 
-// Применяет фильтр прямо к пиксельному буферу ImageData (in-place).
 function applyFilterToData(type, data) {
     if (type === 'contrast') {
-        // Сильный контраст + небольшое затемнение
         for (let i = 0; i < data.length; i += 4) {
             for (let c = 0; c < 3; c++) {
                 let val = data[i + c];
@@ -580,7 +524,6 @@ function applyFilterToData(type, data) {
         }
     }
     else if (type === 'rb') {
-        // R - B разница
         for (let i = 0; i < data.length; i += 4) {
             const r = data[i];
             const b = data[i + 2];
@@ -590,7 +533,6 @@ function applyFilterToData(type, data) {
         }
     }
     else if (type === 'median_stretch') {
-        // Grayscale + сильный stretch
         for (let i = 0; i < data.length; i += 4) {
             let gray = data[i] * 0.4 + data[i+1] * 0.4 + data[i+2] * 0.2;
             gray = (gray - 180) * 4.5;
@@ -608,16 +550,13 @@ function applyFilterToData(type, data) {
         }
     }
     else if (type === 'max_readable') {
-        // Комбо: R-B + сильный контраст
         for (let i = 0; i < data.length; i += 4) {
             const r = data[i];
             const g = data[i+1];
             const b = data[i+2];
-            
             let val = (r - b) * 2.8 + (r - g) * 0.6;
             val = (val - 10) * 1.8 + 90;
             val = Math.max(0, Math.min(255, val));
-            
             data[i] = data[i+1] = data[i+2] = val;
         }
     }
@@ -632,7 +571,6 @@ function handleModalZoom(e) {
     updateTransform();
 }
 
-// Единый transform на весь контейнер сетки — все карточки зумятся/двигаются вместе.
 function updateTransform() {
     filterGrid.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
 }
