@@ -1,67 +1,28 @@
-# server.py
-import pandas as pd
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import HTMLResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
-import uvicorn
-import io
+import threading
+import webbrowser
+import os
+import http.server
+import socketserver
 
-from ocr_engine import extract_price_from_url
+PORT = 8000
+os.chdir(os.path.dirname(os.path.abspath(__file__)))  # Работаем в папке со скриптом
 
-app = FastAPI()
+def open_browser():
+    webbrowser.open_new(f"http://127.0.0.1:{PORT}/dash.html")
 
-# Обслуживаем статические файлы (ваш HTML)
-app.mount("/static", StaticFiles(directory="."), name="static")
+# Запускаем сервер
+handler = http.server.SimpleHTTPRequestHandler
+httpd = socketserver.TCPServer(("", PORT), handler)
 
-# Храним текущее состояние
-current_data = []
+print(f"🚀 Сервер запущен! Открываю браузер: http://127.0.0.1:{PORT}/dash.html")
+print("Нажмите Ctrl+C, чтобы остановить сервер.")
 
-@app.get("/", response_class=HTMLResponse)
-async def get_index():
-    # Отдаем ваш HTML
-    with open("dash.html", "r", encoding="utf-8") as f:
-        return HTMLResponse(f.read())
+# Открываем браузер в отдельном потоке через полсекунды, 
+# чтобы сервер успел подняться
+threading.Timer(1.0, open_browser).start()
 
-@app.post("/upload/")
-async def upload_csv(file: UploadFile = File(...)):
-    global current_data
-    content = await file.read()
-    df = pd.read_csv(io.BytesIO(content))
-    
-    current_data = []
-    for idx, row in df.iterrows():
-        url = str(row['test'])
-        label = str(row['label'])
-        current_data.append({
-            "id": idx,
-            "url": url,
-            "label": label,
-            "ocr_result": None,
-            "error": None
-        })
-    return {"message": f"Загружено {len(current_data)} строк"}
-
-@app.post("/process-all/")
-async def process_all():
-    """Запускает OCR по всем загруженным картинкам."""
-    for item in current_data:
-        if item["error"] is None:
-            val, err = extract_price_from_url(item["url"])
-            item["ocr_result"] = val
-            item["error"] = err
-    return {"message": "Обработка завершена"}
-
-@app.post("/process-one/{item_id}/")
-async def process_one(item_id: int):
-    item = current_data[item_id]
-    val, err = extract_price_from_url(item["url"])
-    item["ocr_result"] = val
-    item["error"] = err
-    return item
-
-@app.get("/api/data/")
-async def get_data():
-    return current_data
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+try:
+    httpd.serve_forever()
+except KeyboardInterrupt:
+    print("\nСервер остановлен.")
+    httpd.server_close()
