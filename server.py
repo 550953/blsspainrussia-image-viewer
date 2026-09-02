@@ -1,28 +1,73 @@
-import threading
-import webbrowser
 import os
-import http.server
-import socketserver
+import io
+import requests
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import HTMLResponse, Response, JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+import pandas as pd
+import uvicorn
 
-PORT = 8000
-os.chdir(os.path.dirname(os.path.abspath(__file__)))  # Работаем в папке со скриптом
+app = FastAPI()
 
-def open_browser():
-    webbrowser.open_new(f"http://127.0.0.1:{PORT}/dash.html")
+# Разрешаем любые домены (важно, чтобы работало в браузере)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Запускаем сервер
-handler = http.server.SimpleHTTPRequestHandler
-httpd = socketserver.TCPServer(("", PORT), handler)
+# Храним данные в памяти (для одного пользователя достаточно)
+current_data = []
 
-print(f"🚀 Сервер запущен! Открываю браузер: http://127.0.0.1:{PORT}/dash.html")
-print("Нажмите Ctrl+C, чтобы остановить сервер.")
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    # Отдаем ваш HTML
+    with open("index.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(f.read())
 
-# Открываем браузер в отдельном потоке через полсекунды, 
-# чтобы сервер успел подняться
-threading.Timer(1.0, open_browser).start()
+# Эндпоинт для скачивания картинки через наш сервер (обходим CORS)
+@app.get("/proxy-image")
+async def proxy_image(url: str):
+    try:
+        response = requests.get(url)
+        return Response(content=response.content, media_type="image/jpeg")
+    except Exception as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
 
-try:
-    httpd.serve_forever()
-except KeyboardInterrupt:
-    print("\nСервер остановлен.")
-    httpd.server_close()
+# Загрузка CSV
+@app.post("/upload")
+async def upload_csv(file: UploadFile = File(...)):
+    global current_data
+    content = await file.read()
+    
+    # Парсим CSV
+    df = pd.read_csv(io.BytesIO(content))
+    
+    current_data = []
+    for idx, row in df.iterrows():
+        current_data.append({
+            "id": idx,
+            "url": str(row['test']),
+            "label": str(row['label']),
+            "edited": str(row['label'])
+        })
+    
+    return {"message": f"Загружено {len(current_data)} строк"}
+
+# Получить все данные
+@app.get("/api/data")
+async def get_data():
+    return current_data
+
+# Сохранить исправленные данные
+@app.post("/api/save")
+async def save_data(new_data: list):
+    global current_data
+    current_data = new_data
+    return {"message": "Данные сохранены"}
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
