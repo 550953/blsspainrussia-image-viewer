@@ -52,6 +52,16 @@
             box-shadow: 0 0 0 2px rgba(179,59,59,0.35);
             background: #241414 !important;
         }
+        .card.reviewed {
+            border-color: #3ba363 !important;
+        }
+        .card.reviewed .img-wrap { box-shadow: inset 0 0 0 2px rgba(59,163,99,0.5); }
+
+        .select-checkbox {
+            position: absolute; top: 4px; left: 6px; z-index: 3;
+            width: 18px; height: 18px; cursor: pointer; accent-color: #4c6ef5;
+        }
+        .card.selected { outline: 2px solid #4c6ef5; outline-offset: 1px; }
 
         .card .img-wrap {
             position: relative; background: #07090d; display: flex; align-items: center; justify-content: center;
@@ -61,12 +71,19 @@
             width: 100%; height: 100%; object-fit: contain;
             image-rendering: pixelated; image-rendering: crisp-edges;
         }
-        .card .img-wrap .badge-idx { position: absolute; top: 4px; left: 6px; background: rgba(0,0,0,0.8); padding: 1px 6px; border-radius: 4px; font-size: 10px; color: #aaa; z-index: 2; }
+        .card .img-wrap .badge-idx { position: absolute; top: 4px; left: 30px; background: rgba(0,0,0,0.8); padding: 1px 6px; border-radius: 4px; font-size: 10px; color: #aaa; z-index: 2; }
+        .card .img-wrap .badge-reviewed { position: absolute; bottom: 4px; left: 6px; background: #3ba363; color: #000; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; z-index: 2; display: none; }
+        .card.reviewed .img-wrap .badge-reviewed { display: block; }
         .card .img-wrap .badge-edited { position: absolute; top: 4px; right: 6px; background: #f3c763; color: #000; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; z-index: 2; display: none; }
         .card.changed .img-wrap .badge-edited { display: block; }
 
         .card .info { display: flex; flex-direction: column; gap: 4px; }
-        .card .info .filename { font-size: 11px; color: #999; word-break: break-all; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .card .info .filename { font-size: 11px; color: #999; word-break: break-all; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+        .card .info .filename:hover { color: #4c6ef5; text-decoration: underline; }
+
+        .broken-row + .broken-row { margin-top: -2px; }
+        .reviewed-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #ccc; cursor: pointer; user-select: none; }
+        .reviewed-row input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-color: #3ba363; }
 
         .control-row {
             display: flex; align-items: center; gap: 6px; background: #0f1117;
@@ -144,6 +161,13 @@
             image-rendering: pixelated; image-rendering: crisp-edges;
             border: 1px solid #2a2d36; border-radius: 6px; background: #111;
         }
+        .filter-panel.chosen img { border-color: #3ba363; box-shadow: 0 0 0 2px rgba(59,163,99,0.5); }
+        .filter-panel .use-filter-btn {
+            font-size: 11px; padding: 4px 10px; border-radius: 5px; border: 1px solid #2a2d36;
+            background: #1a1d24; color: #ccc; cursor: pointer;
+        }
+        .filter-panel .use-filter-btn:hover { background: #2d8a4e; border-color: #3ba363; color: #fff; }
+        .filter-panel.chosen .use-filter-btn { background: #2d8a4e; border-color: #3ba363; color: #fff; }
 
         .modal-filters { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; justify-content: center; z-index: 1010; }
         .modal-filters button {
@@ -168,6 +192,7 @@
         <span class="badge">✅ Совпадает: <b id="matchCount">0</b></span>
         <span class="badge warn">⚠️ Отличается: <b id="mismatchCount">0</b></span>
         <span class="badge broken">🐞 Забаговано: <b id="brokenCount">0</b></span>
+        <span class="badge reviewed-badge" style="background:#1f5a3a;border-color:#3ba363;">👀 Проверено: <b id="reviewedCount">0</b></span>
     </div>
 
     <div class="toolbar">
@@ -176,6 +201,9 @@
         </label>
         <button class="danger" onclick="resetAll()">↩️ Сбросить изменённые</button>
         <button class="secondary" onclick="exportCSV()">📥 Экспорт CSV</button>
+        <button class="secondary" onclick="selectAllOnPage()">☑️ Выделить страницу</button>
+        <button class="secondary" onclick="clearSelection()">▫️ Снять выделение (<span id="selCount">0</span>)</button>
+        <button onclick="markSelectedReviewed()">✅ Отметить выбранные проверено</button>
 
         <input type="text" id="searchInput" placeholder="🔍 Поиск по имени файла..." oninput="currentPage=1; renderCards()" style="flex:1;min-width:120px;" />
         <select id="filterSelect" onchange="currentPage=1; renderCards()">
@@ -183,6 +211,8 @@
             <option value="mismatch">⚠️ Только отличия</option>
             <option value="changed">✏️ Изменённые</option>
             <option value="broken">🐞 Забагованные</option>
+            <option value="reviewed">👀 Проверенные</option>
+            <option value="unreviewed">🕓 Непроверенные</option>
         </select>
     </div>
 
@@ -218,6 +248,9 @@
 let allData = [];
 let originalData = [];
 let changedIndices = new Set();
+let selectedIndices = new Set();
+let lastSelectIdx = null;
+let currentModalIdx = null;
 let currentPage = 1;
 const pageSize = 60;
 
@@ -305,11 +338,12 @@ function renderCards() {
         return;
     }
 
-    let matchCount = 0, mismatchCount = 0, brokenCount = 0;
+    let matchCount = 0, mismatchCount = 0, brokenCount = 0, reviewedCount = 0;
     allData.forEach((row) => {
         if (String(row.label) === String(row.original_label)) matchCount++;
         else mismatchCount++;
         if (row.is_broken) brokenCount++;
+        if (row.reviewed) reviewedCount++;
     });
 
     document.getElementById('totalCount').textContent = allData.length;
@@ -317,6 +351,8 @@ function renderCards() {
     document.getElementById('matchCount').textContent = matchCount;
     document.getElementById('mismatchCount').textContent = mismatchCount;
     document.getElementById('brokenCount').textContent = brokenCount;
+    document.getElementById('reviewedCount').textContent = reviewedCount;
+    document.getElementById('selCount').textContent = selectedIndices.size;
 
     const filteredIndices = getFilteredIndices();
     const totalPages = Math.ceil(filteredIndices.length / pageSize) || 1;
@@ -335,8 +371,10 @@ function renderCards() {
             const currentLabel = row.label || '';
             const isChanged = changedIndices.has(idx);
             const isBroken = !!row.is_broken;
+            const isReviewed = !!row.reviewed;
+            const isSelected = selectedIndices.has(idx);
             const comment = row.comment || '';
-            const cardClass = `card ${isChanged ? 'changed' : ''} ${isBroken ? 'broken' : ''}`;
+            const cardClass = `card ${isChanged ? 'changed' : ''} ${isBroken ? 'broken' : ''} ${isReviewed ? 'reviewed' : ''} ${isSelected ? 'selected' : ''}`;
 
             // Первые ~8 карточек — то, что видно сразу без скролла: грузим их без "lazy"
             // и с высоким приоритетом, остальные — как обычно, лениво.
@@ -344,17 +382,23 @@ function renderCards() {
             const loadingAttr = isAboveFold ? 'eager' : 'lazy';
             const priorityAttr = isAboveFold ? 'fetchpriority="high"' : 'fetchpriority="low"';
 
+            const selectCheckbox = `<input type="checkbox" class="select-checkbox" ${isSelected ? 'checked' : ''}
+                onclick="event.stopPropagation(); toggleSelect(event, ${idx}, this.checked)" title="Выделить (Shift+клик — диапазон)" />`;
+
             let imgBlock = '';
             if (imgSrc && imgSrc.length > 3) {
                 imgBlock = `
-                <div class="img-wrap" onclick="openModal('${imgSrc}', '${getFileName(imgSrc)}')">
+                <div class="img-wrap" onclick="openModal(${idx}, '${imgSrc}', '${getFileName(imgSrc)}')">
+                    ${selectCheckbox}
                     <img src="/proxy-image?url=${encodeURIComponent(imgSrc)}" loading="${loadingAttr}" ${priorityAttr} onerror="this.onerror=null; this.alt='⚠️ Ошибка фото';" />
                     <span class="badge-idx">#${row.id}</span>
                     <span class="badge-edited">✏️ изм.</span>
+                    <span class="badge-reviewed">👀 ок</span>
                 </div>`;
             } else {
                 imgBlock = `
                 <div class="img-wrap" style="background: #12151c; cursor: default;">
+                    ${selectCheckbox}
                     <span style="color: #444; font-size: 10px;">Нет фото</span>
                     <span class="badge-idx">#${row.id}</span>
                 </div>`;
@@ -364,7 +408,7 @@ function renderCards() {
             <div class="${cardClass}" id="card-${idx}">
                 ${imgBlock}
                 <div class="info">
-                    <div class="filename" title="${imgSrc}">${getFileName(imgSrc)}</div>
+                    <div class="filename" title="Клик — скопировать имя файла: ${imgSrc}" onclick="copyFilename(event, ${idx})">${getFileName(imgSrc)}</div>
                     <div class="control-row">
                         <input type="text" maxlength="6" class="price-input ${isChanged ? 'changed-input' : ''}" value="${currentLabel}"
                                oninput="updateLabel(${idx}, this.value)" onblur="saveRow(${idx})" />
@@ -375,6 +419,10 @@ function renderCards() {
                     <label class="broken-row">
                         <input type="checkbox" ${isBroken ? 'checked' : ''} onchange="updateBroken(${idx}, this.checked)" />
                         🐞 чек забагован
+                    </label>
+                    <label class="reviewed-row">
+                        <input type="checkbox" ${isReviewed ? 'checked' : ''} onchange="updateReviewed(${idx}, this.checked)" />
+                        ✅ проверено (всё ок)
                     </label>
                     <textarea class="comment-input ${comment ? 'has-comment' : ''}" placeholder="комментарий..."
                               oninput="updateComment(${idx}, this.value)" onblur="saveRow(${idx})">${comment}</textarea>
@@ -440,11 +488,14 @@ function getFilteredIndices() {
         const isMatch = String(currentLabel) === String(row.original_label);
         const isChanged = changedIndices.has(i);
         const isBroken = !!row.is_broken;
+        const isReviewed = !!row.reviewed;
 
         if (search && !fname.includes(search) && !currentLabel.toLowerCase().includes(search)) continue;
         if (filter === 'mismatch' && isMatch) continue;
         if (filter === 'changed' && !isChanged) continue;
         if (filter === 'broken' && !isBroken) continue;
+        if (filter === 'reviewed' && !isReviewed) continue;
+        if (filter === 'unreviewed' && isReviewed) continue;
 
         filtered.push(i);
     }
@@ -488,6 +539,95 @@ function updateBroken(idx, checked) {
     saveRow(idx, true);
 }
 
+function updateReviewed(idx, checked) {
+    allData[idx].reviewed = checked;
+    const card = document.getElementById(`card-${idx}`);
+    if (card) card.classList.toggle('reviewed', checked);
+    saveRow(idx, true);
+    document.getElementById('reviewedCount').textContent = allData.filter(r => r.reviewed).length;
+}
+
+// ====================== КОПИРОВАНИЕ ИМЕНИ ФАЙЛА В БУФЕР ======================
+function copyFilename(e, idx) {
+    e.stopPropagation();
+    const row = allData[idx];
+    const fname = getFileName(row.url || '');
+    if (!fname || fname === '(нет пути)') return;
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(fname)
+            .then(() => showToast('📋 Скопировано: ' + fname))
+            .catch(() => copyFallback(fname));
+    } else {
+        copyFallback(fname);
+    }
+}
+
+function copyFallback(text) {
+    // На случай если браузер не даёт доступ к Clipboard API (нет фокуса, http без https, отказ разрешения) —
+    // старый способ через скрытый textarea + execCommand всё равно чаще всего срабатывает.
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showToast('📋 Скопировано: ' + text);
+    } catch (err) {
+        showToast('❌ Не удалось скопировать имя файла', false);
+    }
+}
+
+// ====================== МАССОВОЕ ВЫДЕЛЕНИЕ КАРТОЧЕК ======================
+function toggleSelect(e, idx, checked) {
+    if (e.shiftKey && lastSelectIdx !== null) {
+        const lo = Math.min(lastSelectIdx, idx);
+        const hi = Math.max(lastSelectIdx, idx);
+        for (let i = lo; i <= hi; i++) {
+            if (checked) selectedIndices.add(i); else selectedIndices.delete(i);
+        }
+        renderCards();
+    } else {
+        if (checked) selectedIndices.add(idx); else selectedIndices.delete(idx);
+        const card = document.getElementById(`card-${idx}`);
+        if (card) card.classList.toggle('selected', checked);
+        document.getElementById('selCount').textContent = selectedIndices.size;
+    }
+    lastSelectIdx = idx;
+}
+
+function selectAllOnPage() {
+    const filteredIndices = getFilteredIndices();
+    const start = (currentPage - 1) * pageSize;
+    const pageIndices = filteredIndices.slice(start, start + pageSize);
+    pageIndices.forEach(idx => selectedIndices.add(idx));
+    renderCards();
+}
+
+function clearSelection() {
+    selectedIndices.clear();
+    lastSelectIdx = null;
+    renderCards();
+}
+
+async function markSelectedReviewed() {
+    if (selectedIndices.size === 0) {
+        showToast('ℹ️ Ничего не выделено', false);
+        return;
+    }
+    const idxToMark = [...selectedIndices];
+    for (const idx of idxToMark) {
+        allData[idx].reviewed = true;
+        await saveRow(idx, true);
+    }
+    showToast(`✅ Отмечено проверено: ${idxToMark.length}`);
+    selectedIndices.clear();
+    renderCards();
+}
+
 async function saveRow(idx, immediate) {
     const row = allData[idx];
     const hint = document.getElementById(`save-hint-${idx}`);
@@ -500,7 +640,9 @@ async function saveRow(idx, immediate) {
                 id: row.id,
                 label: row.label,
                 comment: row.comment || null,
-                is_broken: !!row.is_broken
+                is_broken: !!row.is_broken,
+                reviewed: !!row.reviewed,
+                best_filter: row.best_filter || null
             })
         });
         const result = await resp.json();
@@ -562,7 +704,8 @@ const modal = document.getElementById('imageModal');
 const modalWrap = document.getElementById('modalWrap');
 const filterGrid = document.getElementById('filterGrid');
 
-async function openModal(src, titleText) {
+async function openModal(idx, src, titleText) {
+    currentModalIdx = idx;
     document.getElementById('modalTitle').textContent = titleText;
     modal.style.display = 'flex';
     filterGrid.innerHTML = '<div style="color:#888; padding:40px; grid-column:1/-1;">Обрабатываю варианты на сервере…</div>';
@@ -584,9 +727,13 @@ async function openModal(src, titleText) {
 
 function renderFilterGrid(filters) {
     filterGrid.innerHTML = '';
+    const row = currentModalIdx !== null ? allData[currentModalIdx] : null;
+    const chosenKey = row ? row.best_filter : null;
+
     filters.forEach(f => {
         const panel = document.createElement('div');
-        panel.className = 'filter-panel';
+        panel.className = 'filter-panel' + (f.key === chosenKey ? ' chosen' : '');
+        panel.id = `filter-panel-${f.key}`;
 
         const label = document.createElement('div');
         label.className = 'panel-label';
@@ -605,8 +752,43 @@ function renderFilterGrid(filters) {
             panel.appendChild(errBox);
         }
 
+        if (f.image) {
+            const useBtn = document.createElement('button');
+            useBtn.className = 'use-filter-btn';
+            useBtn.textContent = f.key === chosenKey ? '✅ Выбрано' : '☑️ Здесь видно';
+            useBtn.onclick = () => chooseBestFilter(f.key, f.label);
+            panel.appendChild(useBtn);
+        }
+
         filterGrid.appendChild(panel);
     });
+}
+
+// Отмечаем, какой именно фильтр показал цифры чётче всего — сохраняем в базу
+// (best_filter) и одновременно помечаем чек как "проверено", чтобы потом
+// не пересматривать заново. Пригодится как подсказка: для похожего фона/цвета
+// сразу открывать нужный фильтр, а не прогонять все варианты.
+async function chooseBestFilter(key, label) {
+    if (currentModalIdx === null) return;
+    const idx = currentModalIdx;
+    allData[idx].best_filter = key;
+    allData[idx].reviewed = true;
+    await saveRow(idx, true);
+
+    document.querySelectorAll('.filter-panel').forEach(p => {
+        p.classList.remove('chosen');
+        const btn = p.querySelector('.use-filter-btn');
+        if (btn) btn.textContent = '☑️ Здесь видно';
+    });
+    const chosenPanel = document.getElementById(`filter-panel-${key}`);
+    if (chosenPanel) {
+        chosenPanel.classList.add('chosen');
+        const btn = chosenPanel.querySelector('.use-filter-btn');
+        if (btn) btn.textContent = '✅ Выбрано';
+    }
+
+    showToast(`✅ Отмечено: "${label}" — читаемо, чек помечен проверенным`);
+    renderCards(); // обновит рамку/бейдж "проверено" на карточке под модалкой
 }
 
 function closeModal() {
