@@ -261,7 +261,7 @@ class LRUCache:
 
 
 image_bytes_cache = LRUCache(maxsize=250)   # сырые байты фото с Backblaze
-filters_cache = LRUCache(maxsize=60)        # готовые 14 вариантов обработки (тяжелее по памяти)
+filters_cache = LRUCache(maxsize=60)        # готовые варианты обработки (тяжелее по памяти)
 
 IMAGE_CACHE_CONTROL = "public, max-age=604800, immutable"  # неделя — фото по URL не меняются
 
@@ -295,6 +295,18 @@ async def proxy_image(url: str):
 
 # ============================================================
 #              ФИЛЬТРЫ ДЛЯ ПРОВЕРКИ ЧИТАЕМОСТИ
+#
+#   Набор пересобран после разбора конкретных "бледных" чеков
+#   (низкий контраст, почти белый фон, ~150x80px, тяжёлый JPEG).
+#   Раньше половина фильтров растягивала разницу каналов
+#   ФИКСИРОВАННЫМИ alpha/beta — на таких бледных фото это либо
+#   клипует всё в чистый чёрный/белый, либо не даёт контраста.
+#   Сейчас база — адаптивная percentile-растяжка (_pct_stretch),
+#   она сама подстраивается под реальный разброс яркости каждого
+#   конкретного фото, а не бьёт по одному и тому же коэффициенту
+#   для всех. Дублирующие "почти одинаковые" каналы (R-B и B-R и
+#   т.п. отличаются только инверсией) убраны — их было 6-7 штук,
+#   несущих одну и ту же информацию.
 # ============================================================
 def _to_gray(bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -302,6 +314,14 @@ def _to_gray(bgr: np.ndarray) -> np.ndarray:
 
 def _auto_invert(gray: np.ndarray) -> np.ndarray:
     return 255 - gray if float(np.mean(gray)) > 140 else gray
+
+
+def _pct_stretch(arr: np.ndarray, lo: float = 1, hi: float = 99) -> np.ndarray:
+    """Растяжка гистограммы по процентилям — подстраивается под контраст
+    конкретного фото вместо фиксированных alpha/beta."""
+    lo_v, hi_v = np.percentile(arr, [lo, hi])
+    out = (arr.astype(np.float32) - lo_v) / (hi_v - lo_v + 1e-6) * 255
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def f_original(bgr):
@@ -312,13 +332,6 @@ def f_fast_clahe(bgr):
     base = _auto_invert(_to_gray(bgr))
     clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8, 8))
     return clahe.apply(base)
-
-
-def f_strong_contrast(bgr):
-    base = _auto_invert(_to_gray(bgr))
-    strong = cv2.convertScaleAbs(base, alpha=2.8, beta=-60)
-    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(6, 6))
-    return clahe.apply(strong)
 
 
 def f_adaptive_threshold(bgr):
@@ -332,132 +345,72 @@ def f_adaptive_threshold(bgr):
     return binary
 
 
-def f_aggressive_otsu(bgr):
-    base = _auto_invert(_to_gray(bgr))
-    den = cv2.GaussianBlur(base, (3, 3), 0)
-    den = cv2.convertScaleAbs(den, alpha=3.2, beta=-80)
-    clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(4, 4))
-    den = clahe.apply(den)
-    _, otsu = cv2.threshold(den, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+def f_br_stretch(bgr):
+    """B-R разница с адаптивной percentile-растяжкой. Основной рабочий
+    вариант для бледных/белесых чеков — самый согласованный сигнал
+    в тестах на низкоконтрастных фото."""
+    b, g, r = cv2.split(bgr.astype(np.float32))
+    return _pct_stretch(b - r)
+
+
+def f_otsu_br(bgr):
+    """Самый чистый бинарный результат в тестах — Otsu поверх
+    percentile-растянутой B-R разницы."""
+    b, g, r = cv2.split(bgr.astype(np.float32))
+    stretched = _pct_stretch(b - r)
+    _, otsu = cv2.threshold(stretched, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return otsu
 
 
-def f_rb_diff(bgr):
+def f_bilateral_otsu_br(bgr):
+    """То же + bilateral перед порогом — гасит мелкий JPEG-блочный шум,
+    сохраняя края букв."""
     b, g, r = cv2.split(bgr.astype(np.float32))
-    val = (r - b) * 3.0 + 128
-    return np.clip(val, 0, 255).astype(np.uint8)
-
-
-def f_median_stretch(bgr):
-    b, g, r = cv2.split(bgr.astype(np.float32))
-    gray = r * 0.4 + g * 0.4 + b * 0.2
-    gray = (gray - 180) * 4.5
-    return np.clip(gray, 0, 255).astype(np.uint8)
-
-
-def f_invert_contrast(bgr):
-    gray = _to_gray(bgr).astype(np.float32)
-    inv = 255 - gray
-    val = (inv - 128) * 2.2 + 128
-    return np.clip(val, 0, 255).astype(np.uint8)
-
-
-def f_max_readable(bgr):
-    b, g, r = cv2.split(bgr.astype(np.float32))
-    val = (r - b) * 2.8 + (r - g) * 0.6
-    val = (val - 10) * 1.8 + 90
-    return np.clip(val, 0, 255).astype(np.uint8)
-
-
-def f_unsharp(bgr):
-    gray = _auto_invert(_to_gray(bgr))
-    blurred = cv2.GaussianBlur(gray, (0, 0), sigmaX=3)
-    sharp = cv2.addWeighted(gray, 2.2, blurred, -1.2, 0)
-    return sharp
-
-
-def f_bilateral_denoise(bgr):
-    gray = _auto_invert(_to_gray(bgr))
-    smooth = cv2.bilateralFilter(gray, d=7, sigmaColor=60, sigmaSpace=60)
+    stretched = _pct_stretch(b - r)
+    smooth = cv2.bilateralFilter(stretched, d=5, sigmaColor=30, sigmaSpace=30)
     _, otsu = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return otsu
 
 
-def f_morph_gradient(bgr):
-    gray = _auto_invert(_to_gray(bgr))
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    grad = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, kernel)
-    grad = cv2.convertScaleAbs(grad, alpha=2.5, beta=0)
-    return grad
+def f_clahe_br(bgr):
+    """CLAHE поверх уже растянутой B-R — усиливает локальный контраст
+    без пересветов, которые давал CLAHE на сыром канале."""
+    b, g, r = cv2.split(bgr.astype(np.float32))
+    stretched = _pct_stretch(b - r)
+    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
+    return clahe.apply(stretched)
 
 
-def f_local_mean_threshold(bgr):
-    gray = _auto_invert(_to_gray(bgr))
-    binary = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 25, 5
-    )
-    return binary
+def f_lab_b_stretch(bgr):
+    """L*a*b* b-канал (жёлто-синяя ось) — иногда ловит то, что
+    RGB-разности замыливают, особенно на желтоватых/бежевых фото."""
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    _, _, b_channel = cv2.split(lab)
+    return _pct_stretch(b_channel)
 
 
 def f_upscale_sharpen(bgr):
-    gray = _auto_invert(_to_gray(bgr))
-    h, w = gray.shape
-    big = cv2.resize(gray, (w * 3, h * 3), interpolation=cv2.INTER_CUBIC)
+    """Апскейл x3 поверх percentile-растянутой B-R + резкость —
+    удобно для финального визуального разглядывания."""
+    b, g, r = cv2.split(bgr.astype(np.float32))
+    stretched = _pct_stretch(b - r)
+    h, w = stretched.shape
+    big = cv2.resize(stretched, (w * 3, h * 3), interpolation=cv2.INTER_CUBIC)
     blurred = cv2.GaussianBlur(big, (0, 0), sigmaX=2)
     sharp = cv2.addWeighted(big, 1.8, blurred, -0.8, 0)
     return sharp
 
-def f_cyan_strong(bgr):
-    """Агрессивная B-R разница + растяжка + unsharp (без дорисовки)."""
-    b, g, r = cv2.split(bgr.astype(np.float32))
-    val = (b - r) * 8.0 + (g - r) * 2.0
-    # жёсткая растяжка по процентилям
-    lo, hi = np.percentile(val, 4), np.percentile(val, 96)
-    val = np.clip((val - lo) / (hi - lo + 1e-6) * 255, 0, 255).astype(np.uint8)
-    # unsharp
-    blur = cv2.GaussianBlur(val, (0, 0), 1.1)
-    val = cv2.addWeighted(val, 1.9, blur, -0.9, 0)
-    return np.clip(val, 0, 255).astype(np.uint8)
-
-
-def f_cyan_local(bgr):
-    """Локальный контраст по циану + адаптивный порог + лёгкая морфология."""
-    b, g, r = cv2.split(bgr.astype(np.float32))
-    cyan = b * 0.75 + g * 0.35 - r * 1.15
-    lo, hi = np.percentile(cyan, 3), np.percentile(cyan, 97)
-    cyan = np.clip((cyan - lo) / (hi - lo + 1e-6) * 255, 0, 255).astype(np.uint8)
-
-    # локальный контраст
-    blur = cv2.GaussianBlur(cyan, (0, 0), 2.8)
-    local = cv2.addWeighted(cyan, 3.0, blur, -2.0, 0)
-    local = np.clip(local, 0, 255).astype(np.uint8)
-
-    binary = cv2.adaptiveThreshold(
-        local, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 2
-    )
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-    return binary
 
 FILTERS = [
     ("original", "Оригинал", f_original),
-    ("fast_clahe", "CLAHE (быстрый)", f_fast_clahe),
-    ("strong_contrast", "Сильный контраст", f_strong_contrast),
+    ("fast_clahe", "CLAHE (по серому)", f_fast_clahe),
     ("adaptive_threshold", "Адаптивная бинаризация", f_adaptive_threshold),
-    ("aggressive_otsu", "Агрессивный OTSU", f_aggressive_otsu),
-    ("rb_diff", "R-B разница", f_rb_diff),
-    ("median_stretch", "Median + Stretch", f_median_stretch),
-    ("invert_contrast", "Инверсия + контраст", f_invert_contrast),
-    ("max_readable", "Макс. читаемость", f_max_readable),
-    ("unsharp", "Резкость (unsharp)", f_unsharp),
-    ("bilateral_denoise", "Подавление точечного шума", f_bilateral_denoise),
-    ("morph_gradient", "Морф. градиент (контуры)", f_morph_gradient),
-    ("local_mean_threshold", "Локальный порог (яркость)", f_local_mean_threshold),
+    ("br_stretch", "B-R растяжка (основной)", f_br_stretch),
+    ("otsu_br", "B-R + Otsu (самый чистый)", f_otsu_br),
+    ("bilateral_otsu_br", "B-R + шумодав + Otsu", f_bilateral_otsu_br),
+    ("clahe_br", "B-R + CLAHE", f_clahe_br),
+    ("lab_b_stretch", "LAB b-канал", f_lab_b_stretch),
     ("upscale_sharpen", "Апскейл x3 + резкость", f_upscale_sharpen),
-# --- новые ---
-    ("cyan_strong", "Циан сильный (B-R)", f_cyan_strong),
-    ("cyan_local", "Циан локальный + бинар", f_cyan_local),    
 ]
 
 
