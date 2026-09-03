@@ -29,18 +29,24 @@ app.add_middleware(
 
 
 # ============================================================
-#   СЕКРЕТЫ: сперва пробуем Infisical (Machine Identity),
-#   при любой проблеме — тихо откатываемся на обычные
-#   переменные окружения Render (они остаются рабочим резервом,
-#   их менять/удалять не нужно).
+#   СЕКРЕТЫ: источник истины — Infisical (Machine Identity).
+#   Обычные переменные окружения Render используются ТОЛЬКО как
+#   аварийный фоллбэк, если Infisical реально недоступен —
+#   их можно оставить пустыми, если хочешь, чтобы секреты шли
+#   строго из Infisical.
 # ============================================================
 INFISICAL_CLIENT_ID = os.environ.get("INFISICAL_CLIENT_ID")
 INFISICAL_CLIENT_SECRET = os.environ.get("INFISICAL_CLIENT_SECRET")
 INFISICAL_PROJECT_ID = os.environ.get("INFISICAL_PROJECT_ID")
 INFISICAL_ENVIRONMENT = os.environ.get("ENVIRONMENT") or os.environ.get("INFISICAL_ENVIRONMENT", "dev")
 INFISICAL_HOST = os.environ.get("INFISICAL_HOST", "https://app.infisical.com")
+INFISICAL_SECRET_PATH = os.environ.get("INFISICAL_SECRET_PATH", "/")
 
-SECRETS_SOURCE = "render_env"  # поменяется на "infisical", если реально получится достать оттуда
+SECRETS_SOURCE = "none"
+# подробная диагностика по каждому ключу — видно в /api/status,
+# что конкретно пошло не так (нет доступа, неверное имя, неверный
+# environment_slug и т.д.)
+SECRETS_DEBUG = {}
 
 
 def _infisical_secret_name(key: str) -> str:
@@ -50,58 +56,92 @@ def _infisical_secret_name(key: str) -> str:
     return os.environ.get(f"INFISICAL_SECRET_NAME_{key}", key)
 
 
+def _fetch_from_infisical(client, key: str):
+    """Возвращает (value, error_message)."""
+    secret_name = _infisical_secret_name(key)
+    try:
+        secret = client.secrets.get_secret_by_name(
+            secret_name=secret_name,
+            project_id=INFISICAL_PROJECT_ID,
+            environment_slug=INFISICAL_ENVIRONMENT,
+            secret_path=INFISICAL_SECRET_PATH,
+        )
+        value = (
+            getattr(secret, "secretValue", None)
+            or getattr(secret, "secret_value", None)
+            or (secret.get("secretValue") if isinstance(secret, dict) else None)
+        )
+        if value:
+            return value, None
+        return None, f"секрет '{secret_name}' найден, но значение пустое"
+    except Exception as e:
+        # str(e) у infisical-исключений часто пустой — берём тип + repr,
+        # плюс тело ответа, если это HTTP-ошибка (там обычно и есть причина:
+        # 401 — неверный client_id/secret, 403 — нет доступа к проекту/окружению,
+        # 404 — секрет с таким именем/path/environment не найден).
+        detail = repr(e)
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            try:
+                detail += f" | HTTP {resp.status_code}: {resp.text[:300]}"
+            except Exception:
+                pass
+        return None, f"'{secret_name}' -> {type(e).__name__}: {detail}"
+
+
 def load_secrets() -> dict:
-    global SECRETS_SOURCE
+    global SECRETS_SOURCE, SECRETS_DEBUG
     keys = ["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "APP_USER", "APP_PASS"]
     values = {}
+    debug = {}
 
-    if INFISICAL_CLIENT_ID and INFISICAL_CLIENT_SECRET and INFISICAL_PROJECT_ID:
+    if not (INFISICAL_CLIENT_ID and INFISICAL_CLIENT_SECRET and INFISICAL_PROJECT_ID):
+        msg = "INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET / INFISICAL_PROJECT_ID не заданы в env"
+        print(f"[infisical] {msg}")
+        debug["_connection"] = msg
+    else:
         try:
             from infisical_sdk import InfisicalSDKClient
 
             client = InfisicalSDKClient(host=INFISICAL_HOST)
             client.auth.universal_auth.login(INFISICAL_CLIENT_ID, INFISICAL_CLIENT_SECRET)
+            print(
+                f"[infisical] авторизация прошла успешно, "
+                f"project_id={INFISICAL_PROJECT_ID}, environment_slug={INFISICAL_ENVIRONMENT}, "
+                f"secret_path={INFISICAL_SECRET_PATH}"
+            )
 
             got_any = False
             for key in keys:
-                secret_name = _infisical_secret_name(key)
-                try:
-                    secret = client.secrets.get_secret_by_name(
-                        secret_name=secret_name,
-                        project_id=INFISICAL_PROJECT_ID,
-                        environment_slug=INFISICAL_ENVIRONMENT,
-                        secret_path="/",
-                    )
-                    value = (
-                        getattr(secret, "secretValue", None)
-                        or getattr(secret, "secret_value", None)
-                        or (secret.get("secretValue") if isinstance(secret, dict) else None)
-                    )
-                    if value:
-                        values[key] = value
-                        got_any = True
-                    else:
-                        print(f"[infisical] секрет '{secret_name}' пустой или не найден")
-                except Exception as e:
-                    print(f"[infisical] не смог получить '{secret_name}': {e}")
+                value, error = _fetch_from_infisical(client, key)
+                if value:
+                    values[key] = value
+                    got_any = True
+                    debug[key] = "ok"
+                    print(f"[infisical] '{_infisical_secret_name(key)}' получен успешно")
+                else:
+                    debug[key] = error
+                    print(f"[infisical] {error}")
 
-            if got_any:
-                SECRETS_SOURCE = "infisical"
-                print("[infisical] секреты успешно получены из Infisical")
-            else:
-                print("[infisical] ни один секрет не получен, использую переменные окружения Render")
+            SECRETS_SOURCE = "infisical" if got_any else "infisical_failed"
         except Exception as e:
-            print(f"[infisical] подключение не удалось ({e}), использую переменные окружения Render")
-    else:
-        print("[infisical] INFISICAL_CLIENT_ID/SECRET/PROJECT_ID не заданы — работаю на переменных Render")
+            msg = f"подключение/авторизация в Infisical не удались: {type(e).__name__}: {e!r}"
+            print(f"[infisical] {msg}")
+            debug["_connection"] = msg
 
-    # то, что не достали из Infisical (или если Infisical вообще не настроен) — берём из Render
+    # Render env — только фоллбэк для того, чего не удалось достать из Infisical
+    used_render_fallback = []
     for key in keys:
         if not values.get(key):
             env_value = os.environ.get(key)
             if env_value:
                 values[key] = env_value
+                used_render_fallback.append(key)
+    if used_render_fallback:
+        print(f"[secrets] взято из Render env как фоллбэк: {used_render_fallback}")
+        SECRETS_SOURCE = "mixed (infisical + render_env)" if SECRETS_SOURCE == "infisical" else "render_env"
 
+    SECRETS_DEBUG = debug
     return values
 
 
@@ -172,6 +212,14 @@ async def api_status():
     и реально ли приложение читает/пишет в Supabase."""
     status = {
         "secrets_source": SECRETS_SOURCE,
+        "secrets_debug": SECRETS_DEBUG,
+        "infisical_project_id": INFISICAL_PROJECT_ID,
+        "infisical_environment": INFISICAL_ENVIRONMENT,
+        "infisical_secret_path": INFISICAL_SECRET_PATH,
+        "infisical_secret_names": {
+            k: _infisical_secret_name(k)
+            for k in ["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "APP_USER", "APP_PASS"]
+        },
         "supabase_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_KEY),
         "supabase_connected": False,
         "row_count": None,
