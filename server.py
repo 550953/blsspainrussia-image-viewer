@@ -406,7 +406,37 @@ def f_upscale_sharpen(bgr):
     blurred = cv2.GaussianBlur(big, (0, 0), sigmaX=2)
     sharp = cv2.addWeighted(big, 1.8, blurred, -0.8, 0)
     return sharp
+def f_cyan_strong(bgr):
+    """Сильная разница Blue-Red + растяжка — хорошо для бледных циановых цифр."""
+    b, g, r = cv2.split(bgr.astype(np.float32))
+    # Цифра циановая → высокий B, низкий R
+    val = (b - r) * 4.5 + 40
+    val = np.clip(val, 0, 255).astype(np.uint8)
+    # Лёгкая очистка
+    val = cv2.medianBlur(val, 3)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    return clahe.apply(val)
 
+
+def f_cyan_local(bgr):
+    """Локальный контраст по циановому каналу + бинаризация."""
+    b, g, r = cv2.split(bgr.astype(np.float32))
+    cyan = (b * 0.6 + g * 0.3 - r * 0.9)
+    cyan = (cyan - cyan.min()) / (cyan.max() - cyan.min() + 1e-6) * 255
+    cyan = cyan.astype(np.uint8)
+
+    # Локальный контраст
+    blur = cv2.GaussianBlur(cyan, (0, 0), sigmaX=2.5)
+    local = cv2.addWeighted(cyan, 2.8, blur, -1.8, 0)
+    local = np.clip(local, 0, 255).astype(np.uint8)
+
+    # Адаптивный порог
+    binary = cv2.adaptiveThreshold(
+        local, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 4
+    )
+    kernel = np.ones((2, 2), np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    return binary
 
 FILTERS = [
     ("original", "Оригинал", f_original),
@@ -423,6 +453,9 @@ FILTERS = [
     ("morph_gradient", "Морф. градиент (контуры)", f_morph_gradient),
     ("local_mean_threshold", "Локальный порог (яркость)", f_local_mean_threshold),
     ("upscale_sharpen", "Апскейл x3 + резкость", f_upscale_sharpen),
+# --- новые ---
+    ("cyan_strong", "Циан сильный (B-R)", f_cyan_strong),
+    ("cyan_local", "Циан локальный + бинар", f_cyan_local),    
 ]
 
 
