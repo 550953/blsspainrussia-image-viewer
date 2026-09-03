@@ -408,47 +408,36 @@ def f_upscale_sharpen(bgr):
     return sharp
 
 def f_cyan_strong(bgr):
-    """Сильная разница Blue-Red + растяжка — для бледных циановых цифр."""
+    """Агрессивная B-R разница + растяжка + unsharp (без дорисовки)."""
     b, g, r = cv2.split(bgr.astype(np.float32))
-    
-    # Более агрессивная разница
-    val = (b - r) * 6.0 + (g - r) * 1.5
-    val = (val - np.percentile(val, 5)) / (np.percentile(val, 98) - np.percentile(val, 5) + 1e-6) * 255
-    val = np.clip(val, 0, 255).astype(np.uint8)
-    
-    # Лёгкое сглаживание + CLAHE
-    val = cv2.GaussianBlur(val, (3, 3), 0)
-    clahe = cv2.createCLAHE(clipLimit=4.5, tileGridSize=(6, 6))
-    val = clahe.apply(val)
-    
-    # Небольшой unsharp
-    blur = cv2.GaussianBlur(val, (0, 0), 1.2)
-    val = cv2.addWeighted(val, 1.7, blur, -0.7, 0)
+    val = (b - r) * 8.0 + (g - r) * 2.0
+    # жёсткая растяжка по процентилям
+    lo, hi = np.percentile(val, 4), np.percentile(val, 96)
+    val = np.clip((val - lo) / (hi - lo + 1e-6) * 255, 0, 255).astype(np.uint8)
+    # unsharp
+    blur = cv2.GaussianBlur(val, (0, 0), 1.1)
+    val = cv2.addWeighted(val, 1.9, blur, -0.9, 0)
     return np.clip(val, 0, 255).astype(np.uint8)
 
 
 def f_cyan_local(bgr):
-    """Локальный контраст по циану + жёсткая бинаризация."""
+    """Локальный контраст по циану + адаптивный порог + лёгкая морфология."""
     b, g, r = cv2.split(bgr.astype(np.float32))
-    
-    cyan = b * 0.7 + g * 0.4 - r * 1.1
-    cyan = (cyan - np.percentile(cyan, 3)) / (np.percentile(cyan, 97) - np.percentile(cyan, 3) + 1e-6) * 255
-    cyan = np.clip(cyan, 0, 255).astype(np.uint8)
+    cyan = b * 0.75 + g * 0.35 - r * 1.15
+    lo, hi = np.percentile(cyan, 3), np.percentile(cyan, 97)
+    cyan = np.clip((cyan - lo) / (hi - lo + 1e-6) * 255, 0, 255).astype(np.uint8)
 
-    # Сильный локальный контраст
-    blur = cv2.GaussianBlur(cyan, (0, 0), sigmaX=3.0)
-    local = cv2.addWeighted(cyan, 3.2, blur, -2.2, 0)
+    # локальный контраст
+    blur = cv2.GaussianBlur(cyan, (0, 0), 2.8)
+    local = cv2.addWeighted(cyan, 3.0, blur, -2.0, 0)
     local = np.clip(local, 0, 255).astype(np.uint8)
 
-    # Адаптивный порог + морфология
     binary = cv2.adaptiveThreshold(
-        local, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 17, 3
+        local, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 2
     )
-    
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
-    
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
     return binary
 
 FILTERS = [
