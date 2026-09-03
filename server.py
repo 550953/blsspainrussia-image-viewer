@@ -264,6 +264,8 @@ image_bytes_cache = LRUCache(maxsize=250)   # сырые байты фото с 
 filters_cache = LRUCache(maxsize=60)        # готовые варианты обработки (тяжелее по памяти)
 
 IMAGE_CACHE_CONTROL = "public, max-age=604800, immutable"  # неделя — фото по URL не меняются
+FILTERS_CACHE_CONTROL = "public, max-age=300"  # 5 минут — набор фильтров ещё дорабатывается,
+                                                # без immutable, чтобы браузер сам перезапрашивал
 
 
 # ============================================================
@@ -431,7 +433,7 @@ async def proxy_filters(url: str):
         return Response(
             content=cached,
             media_type="application/json",
-            headers={"Cache-Control": IMAGE_CACHE_CONTROL},
+            headers={"Cache-Control": FILTERS_CACHE_CONTROL},
         )
 
     try:
@@ -457,7 +459,7 @@ async def proxy_filters(url: str):
     body = json.dumps(payload).encode("utf-8")
     filters_cache.set(url, body)
 
-    return Response(content=body, media_type="application/json", headers={"Cache-Control": IMAGE_CACHE_CONTROL})
+    return Response(content=body, media_type="application/json", headers={"Cache-Control": FILTERS_CACHE_CONTROL})
 
 
 # ============================================================
