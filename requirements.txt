@@ -1,8 +1,9 @@
 fastapi
-uvicorn
-pandas
-requests
+uvicorn[standard]
 python-multipart
+pandas
 numpy
 opencv-python-headless
-Pillow
+pillow
+requests
+supabase

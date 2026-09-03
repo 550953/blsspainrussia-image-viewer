@@ -3,20 +3,21 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>💰 Верификация цен (3800+ фото)</title>
+    <title>💰 Верификация цен</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #e4e6eb; padding: 15px; }
         .container { max-width: 1600px; margin: 0 auto; }
-        
+
         h1 { font-size: 20px; margin-bottom: 6px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
         h1 small { font-weight: 400; font-size: 13px; color: #888; }
-        
+
         .stats { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0 14px; font-size: 13px; }
         .stats span { background: #1e2128; padding: 4px 12px; border-radius: 6px; border: 1px solid #2a2d36; }
         .stats .badge { background: #2d8a4e; border-color: #3ba363; }
         .stats .badge.warn { background: #8a6d2d; border-color: #c99a3b; }
-        
+        .stats .badge.broken { background: #7a2d2d; border-color: #b33b3b; }
+
         .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
         .toolbar input[type="text"], .toolbar select, .toolbar button, .file-upload-btn {
             padding: 7px 12px; border-radius: 6px; border: 1px solid #2a2d36;
@@ -32,55 +33,72 @@
         .file-upload-btn:hover { background: #4c6ef5; }
         input[type="file"] { display: none; }
 
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
-        
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+
         .card {
             background: #1a1d24; border-radius: 8px; border: 1px solid #2a2d36;
             overflow: hidden; transition: border-color 0.2s, box-shadow 0.2s;
             display: flex; flex-direction: column; padding: 8px; gap: 6px;
         }
         .card:hover { border-color: #3a3d46; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
-        
-        .card.changed { 
-            border-color: #f3c763 !important; 
-            box-shadow: 0 0 0 2px rgba(243,199,99,0.3); 
+
+        .card.changed {
+            border-color: #f3c763 !important;
+            box-shadow: 0 0 0 2px rgba(243,199,99,0.3);
             background: #231f14 !important;
         }
-        
+        .card.broken {
+            border-color: #b33b3b !important;
+            box-shadow: 0 0 0 2px rgba(179,59,59,0.35);
+            background: #241414 !important;
+        }
+
         .card .img-wrap {
             position: relative; background: #07090d; display: flex; align-items: center; justify-content: center;
-            height: 210px; width: 100%; overflow: hidden; border-radius: 6px; border: 1px solid #2a2d36; cursor: zoom-in;
+            height: 200px; width: 100%; overflow: hidden; border-radius: 6px; border: 1px solid #2a2d36; cursor: zoom-in;
         }
-        .card .img-wrap img { 
-            width: 100%; height: 100%; object-fit: contain; 
+        .card .img-wrap img {
+            width: 100%; height: 100%; object-fit: contain;
             image-rendering: pixelated; image-rendering: crisp-edges;
         }
         .card .img-wrap .badge-idx { position: absolute; top: 4px; left: 6px; background: rgba(0,0,0,0.8); padding: 1px 6px; border-radius: 4px; font-size: 10px; color: #aaa; z-index: 2; }
         .card .img-wrap .badge-edited { position: absolute; top: 4px; right: 6px; background: #f3c763; color: #000; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; z-index: 2; display: none; }
         .card.changed .img-wrap .badge-edited { display: block; }
-        
+
         .card .info { display: flex; flex-direction: column; gap: 4px; }
-        .card .info .filename { font-size: 10px; color: #777; word-break: break-all; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        
+        .card .info .filename { font-size: 11px; color: #999; word-break: break-all; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
         .control-row {
             display: flex; align-items: center; gap: 6px; background: #0f1117;
             padding: 4px; border-radius: 6px; border: 1px solid #2a2d36;
         }
-        .control-row input {
-            width: 75px; padding: 4px; border-radius: 4px; border: 1px solid #2a2d36;
-            background: #1a1d24; color: #e4e6eb; font-size: 18px; font-weight: 700; font-family: monospace;
+        .control-row input.price-input {
+            width: 100px; padding: 6px; border-radius: 4px; border: 1px solid #2a2d36;
+            background: #1a1d24; color: #e4e6eb; font-size: 28px; font-weight: 700; font-family: monospace;
             text-align: center;
         }
-        .control-row input:focus { outline: none; border-color: #3ba363; }
+        .control-row input.price-input:focus { outline: none; border-color: #3ba363; }
         .control-row input.changed-input { border-color: #f3c763 !important; background: #2f2714 !important; color: #f3c763 !important; }
 
         .card .actions { display: flex; flex-direction: column; gap: 2px; flex: 1; }
         .card .actions button { width: 100%; border-radius: 4px; border: none; cursor: pointer; font-weight: 600; padding: 5px; transition: 0.2s; font-size: 11px; }
-        .card .actions button.save-one { background: #2d8a4e; color: #fff; }
-        .card .actions button.save-one:hover { background: #3ba363; }
-        .card .actions button.reset-one { background: #2a2d36; color: #888; font-size: 10px; padding: 2px; }
+        .card .actions button.reset-one { background: #2a2d36; color: #888; font-size: 10px; padding: 4px; }
         .card .actions button.reset-one:hover { background: #3a3d46; color: #ccc; }
-        
+
+        .broken-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #ccc; cursor: pointer; user-select: none; }
+        .broken-row input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; }
+
+        .comment-input {
+            width: 100%; padding: 5px 6px; border-radius: 4px; border: 1px solid #2a2d36;
+            background: #0f1117; color: #ddd; font-size: 11px; resize: vertical; min-height: 32px; font-family: inherit;
+        }
+        .comment-input:focus { outline: none; border-color: #4c6ef5; }
+        .comment-input.has-comment { border-color: #4c6ef5; }
+
+        .save-hint { font-size: 9px; color: #555; text-align: center; height: 11px; }
+        .save-hint.saved { color: #3ba363; }
+        .save-hint.saving { color: #888; }
+
         .pagination { display: flex; justify-content: center; align-items: center; gap: 10px; margin: 15px 0; }
         .pagination button { background: #1a1d24; color: #e4e6eb; border: 1px solid #2a2d36; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; }
         .pagination button:hover { background: #2a2d36; }
@@ -88,14 +106,14 @@
 
         .toast { position: fixed; bottom: 25px; left: 50%; transform: translateX(-50%); background: #2d8a4e; color: #fff; padding: 10px 24px; border-radius: 10px; font-weight: 500; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,0.6); display: none; z-index: 999; }
         .toast.error { background: #7a2d2d; }
-        
-        .modal { 
-            position: fixed; inset: 0; background: rgba(0,0,0,0.94); display: none; 
-            flex-direction: column; align-items: center; justify-content: center; z-index: 1000; 
+
+        .modal {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.94); display: none;
+            flex-direction: column; align-items: center; justify-content: center; z-index: 1000;
             user-select: none;
         }
         .modal-header {
-            position: absolute; top: 15px; left: 20px; right: 20px; display: flex; 
+            position: absolute; top: 15px; left: 20px; right: 20px; display: flex;
             justify-content: space-between; align-items: center; z-index: 1010; pointer-events: none;
         }
         .modal-title { font-size: 14px; color: #ccc; background: rgba(0,0,0,0.7); padding: 5px 12px; border-radius: 6px; border: 1px solid #333; pointer-events: auto; }
@@ -116,9 +134,7 @@
             width: max-content;
             transform-origin: top left;
         }
-        .filter-panel {
-            display: flex; flex-direction: column; align-items: center; gap: 6px;
-        }
+        .filter-panel { display: flex; flex-direction: column; align-items: center; gap: 6px; }
         .filter-panel .panel-label {
             font-size: 12px; color: #ccc; background: rgba(0,0,0,0.7);
             padding: 3px 10px; border-radius: 5px; border: 1px solid #333; white-space: nowrap;
@@ -128,10 +144,8 @@
             image-rendering: pixelated; image-rendering: crisp-edges;
             border: 1px solid #2a2d36; border-radius: 6px; background: #111;
         }
-        
-        .modal-filters {
-            display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; justify-content: center; z-index: 1010;
-        }
+
+        .modal-filters { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; justify-content: center; z-index: 1010; }
         .modal-filters button {
             background: #1a1d24; color: #ccc; border: 1px solid #333; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px;
         }
@@ -143,39 +157,37 @@
 <body>
 <div class="container">
     <h1>
-        💰 Верификация цен из CSV (3800+ фото)
-        <small id="fileInfo">📄 Записей: 0</small>
+        💰 Верификация цен
+        <small id="fileInfo">Загрузка…</small>
     </h1>
-    
+
     <div class="stats" id="stats">
         <span>📁 Всего: <b id="totalCount">0</b></span>
-        <span>🖼️ С фото: <b id="withImgCount">0</b></span>
         <span>✏️ Изменено: <b id="changedCount">0</b></span>
         <span class="badge">✅ Совпадает: <b id="matchCount">0</b></span>
         <span class="badge warn">⚠️ Отличается: <b id="mismatchCount">0</b></span>
+        <span class="badge broken">🐞 Забаговано: <b id="brokenCount">0</b></span>
     </div>
-    
+
     <div class="toolbar">
         <label class="file-upload-btn">
-            📂 Загрузить CSV <input type="file" id="csvFileInput" accept=".csv" onchange="handleFileSelect(event)">
+            📂 Добавить из CSV <input type="file" id="csvFileInput" accept=".csv" onchange="handleFileSelect(event)">
         </label>
-        <button onclick="saveAll()">💾 Сохранить все</button>
-        <button class="danger" onclick="resetAll()">↩️ Сбросить</button>
+        <button class="danger" onclick="resetAll()">↩️ Сбросить изменённые</button>
         <button class="secondary" onclick="exportCSV()">📥 Экспорт CSV</button>
-        
-        <input type="text" id="searchInput" placeholder="🔍 Поиск..." oninput="currentPage=1; renderCards()" style="flex:1;min-width:120px;" />
+
+        <input type="text" id="searchInput" placeholder="🔍 Поиск по имени файла..." oninput="currentPage=1; renderCards()" style="flex:1;min-width:120px;" />
         <select id="filterSelect" onchange="currentPage=1; renderCards()">
             <option value="all">Все записи</option>
-            <option value="with_img">🖼️ Только с фото</option>
             <option value="mismatch">⚠️ Только отличия</option>
-            <option value="changed">✏️ Измененные</option>
+            <option value="changed">✏️ Изменённые</option>
+            <option value="broken">🐞 Забагованные</option>
         </select>
     </div>
-    
+
     <div id="gridContainer" class="grid">
         <div class="welcome-screen">
-            <h2>👈 Загрузите ваш CSV-файл с ценами и фото</h2>
-            <p>Карточки станут компактными, а фотографии займут максимум пространства.</p>
+            <h2>Загружаю данные…</h2>
         </div>
     </div>
 
@@ -202,9 +214,7 @@
 <div id="toast" class="toast"></div>
 
 <script>
-let csvHeaders = [];
-let rawRows = []; 
-let allData = [];    
+let allData = [];
 let originalData = [];
 let changedIndices = new Set();
 let currentPage = 1;
@@ -212,13 +222,42 @@ const pageSize = 60;
 
 let scale = 1, panX = 0, panY = 0;
 let isDragging = false, startX = 0, startY = 0;
-let currentImageSrc = null;
 
-// !!! ВАЖНО: Загрузка CSV через сервер !!!
+const debounceTimers = {};
+
+window.addEventListener('DOMContentLoaded', loadDataFromServer);
+
+async function loadDataFromServer() {
+    try {
+        const resp = await fetch('/api/data');
+        const data = await resp.json();
+        if (data.error) {
+            showToast('❌ ' + data.error, false);
+            return;
+        }
+        allData = data;
+        originalData = JSON.parse(JSON.stringify(allData));
+        changedIndices.clear();
+        allData.forEach((row, idx) => {
+            if (String(row.label) !== String(row.original_label)) changedIndices.add(idx);
+        });
+        document.getElementById('fileInfo').textContent = `Записей в базе: ${allData.length}`;
+        renderCards();
+    } catch (err) {
+        showToast('❌ Ошибка загрузки данных: ' + err, false);
+    }
+}
+
+function getFileName(url) {
+    if (!url) return '(нет пути)';
+    const clean = String(url).split('?')[0];
+    return clean.substring(clean.lastIndexOf('/') + 1);
+}
+
 async function handleFileSelect(event) {
     const file = event.target.files[0];
     if (!file) return;
-    
+
     const formData = new FormData();
     formData.append('file', file);
 
@@ -228,45 +267,41 @@ async function handleFileSelect(event) {
         showToast('❌ ' + result.error, false);
         return;
     }
-    
-    // Загружаем данные с сервера
-    const dataResponse = await fetch('/api/data');
-    allData = await dataResponse.json();
-    
-    originalData = JSON.parse(JSON.stringify(allData));
-    changedIndices.clear();
-    currentPage = 1;
-    document.getElementById('fileInfo').textContent = `📄 Всего строк: ${allData.length}`;
-    showToast(`📁 Загружено записей: ${allData.length}`);
-    renderCards();
+    showToast(result.message);
+    event.target.value = '';
+    await loadDataFromServer();
 }
 
 function renderCards() {
     const container = document.getElementById('gridContainer');
     const pagination = document.getElementById('paginationControls');
-    
-    if (allData.length === 0) return;
-    
-    let matchCount = 0, mismatchCount = 0, withImgCount = 0;
-    allData.forEach((row, idx) => {
-        if (String(row.label) === String(originalData[idx]?.label)) matchCount++;
+
+    if (allData.length === 0) {
+        container.innerHTML = `<div class="welcome-screen"><h2>👈 Пока нет данных — загрузите CSV</h2></div>`;
+        pagination.style.display = 'none';
+        return;
+    }
+
+    let matchCount = 0, mismatchCount = 0, brokenCount = 0;
+    allData.forEach((row) => {
+        if (String(row.label) === String(row.original_label)) matchCount++;
         else mismatchCount++;
-        if (row.url && row.url.length > 3) withImgCount++;
+        if (row.is_broken) brokenCount++;
     });
 
     document.getElementById('totalCount').textContent = allData.length;
-    document.getElementById('withImgCount').textContent = withImgCount;
     document.getElementById('changedCount').textContent = changedIndices.size;
     document.getElementById('matchCount').textContent = matchCount;
     document.getElementById('mismatchCount').textContent = mismatchCount;
+    document.getElementById('brokenCount').textContent = brokenCount;
 
     const filteredIndices = getFilteredIndices();
     const totalPages = Math.ceil(filteredIndices.length / pageSize) || 1;
     if (currentPage > totalPages) currentPage = totalPages;
-    
+
     const start = (currentPage - 1) * pageSize;
     const pageIndices = filteredIndices.slice(start, start + pageSize);
-    
+
     let html = '';
     if (pageIndices.length === 0) {
         html = `<div style="grid-column: 1/-1; text-align:center; padding: 40px; color: #888;">Ничего не найдено</div>`;
@@ -276,44 +311,52 @@ function renderCards() {
             const imgSrc = row.url || '';
             const currentLabel = row.label || '';
             const isChanged = changedIndices.has(idx);
-            const cardClass = `card ${isChanged ? 'changed' : ''}`;
-            
+            const isBroken = !!row.is_broken;
+            const comment = row.comment || '';
+            const cardClass = `card ${isChanged ? 'changed' : ''} ${isBroken ? 'broken' : ''}`;
+
             let imgBlock = '';
             if (imgSrc && imgSrc.length > 3) {
                 imgBlock = `
-                <div class="img-wrap" onclick="openModal('${imgSrc}', 'Строка #${idx+1}')">
+                <div class="img-wrap" onclick="openModal('${imgSrc}', '${getFileName(imgSrc)}')">
                     <img src="/proxy-image?url=${encodeURIComponent(imgSrc)}" loading="lazy" onerror="this.onerror=null; this.alt='⚠️ Ошибка фото';" />
-                    <span class="badge-idx">#${idx+1}</span>
+                    <span class="badge-idx">#${row.id}</span>
                     <span class="badge-edited">✏️ изм.</span>
                 </div>`;
             } else {
                 imgBlock = `
                 <div class="img-wrap" style="background: #12151c; cursor: default;">
                     <span style="color: #444; font-size: 10px;">Нет фото</span>
-                    <span class="badge-idx">#${idx+1}</span>
+                    <span class="badge-idx">#${row.id}</span>
                 </div>`;
             }
-            
+
             html += `
             <div class="${cardClass}" id="card-${idx}">
                 ${imgBlock}
                 <div class="info">
-                    <div class="filename" title="${imgSrc}">${imgSrc || '(нет пути)'}</div>
+                    <div class="filename" title="${imgSrc}">${getFileName(imgSrc)}</div>
                     <div class="control-row">
-                        <input type="text" maxlength="6" class="${isChanged ? 'changed-input' : ''}" value="${currentLabel}" 
-                               oninput="updateValue(${idx}, this.value)" />
+                        <input type="text" maxlength="6" class="price-input ${isChanged ? 'changed-input' : ''}" value="${currentLabel}"
+                               oninput="updateLabel(${idx}, this.value)" onblur="saveRow(${idx})" />
                         <div class="actions">
-                            <button class="save-one" onclick="showToast('✅ Строка #${idx+1} зафиксирована')">Ок</button>
-                            <button class="reset-one" onclick="resetOne(${idx})">Сброс</button>
+                            <button class="reset-one" onclick="resetOne(${idx})">Сброс цены</button>
                         </div>
                     </div>
+                    <label class="broken-row">
+                        <input type="checkbox" ${isBroken ? 'checked' : ''} onchange="updateBroken(${idx}, this.checked)" />
+                        🐞 чек забагован
+                    </label>
+                    <textarea class="comment-input ${comment ? 'has-comment' : ''}" placeholder="комментарий..."
+                              oninput="updateComment(${idx}, this.value)" onblur="saveRow(${idx})">${comment}</textarea>
+                    <div class="save-hint" id="save-hint-${idx}"></div>
                 </div>
             </div>`;
         });
     }
-    
+
     container.innerHTML = html;
-    
+
     if (filteredIndices.length > pageSize) {
         pagination.style.display = 'flex';
         document.getElementById('pageInfo').textContent = `Страница ${currentPage} из ${totalPages} (Найдено: ${filteredIndices.length})`;
@@ -325,23 +368,21 @@ function renderCards() {
 function getFilteredIndices() {
     const search = document.getElementById('searchInput').value.toLowerCase();
     const filter = document.getElementById('filterSelect').value;
-    
+
     let filtered = [];
     for (let i = 0; i < allData.length; i++) {
         const row = allData[i];
-        const imgSrc = row.url || '';
-        const currentLabel = row.label || '';
-        const origLabel = originalData[i]?.label || '';
-        
-        const isMatch = String(currentLabel) === String(origLabel);
-        const hasImg = imgSrc.length > 3;
+        const fname = getFileName(row.url || '').toLowerCase();
+        const currentLabel = String(row.label || '');
+        const isMatch = String(currentLabel) === String(row.original_label);
         const isChanged = changedIndices.has(i);
-        
-        if (search && !imgSrc.toLowerCase().includes(search) && !currentLabel.toLowerCase().includes(search)) continue;
-        if (filter === 'with_img' && !hasImg) continue;
+        const isBroken = !!row.is_broken;
+
+        if (search && !fname.includes(search) && !currentLabel.toLowerCase().includes(search)) continue;
         if (filter === 'mismatch' && isMatch) continue;
         if (filter === 'changed' && !isChanged) continue;
-        
+        if (filter === 'broken' && !isBroken) continue;
+
         filtered.push(i);
     }
     return filtered;
@@ -357,71 +398,100 @@ function changePage(delta) {
     window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-function updateValue(idx, val) {
+function updateLabel(idx, val) {
     allData[idx].label = val.trim();
-    if (String(allData[idx].label) !== String(originalData[idx].label)) {
+    if (String(allData[idx].label) !== String(allData[idx].original_label)) {
         changedIndices.add(idx);
     } else {
         changedIndices.delete(idx);
     }
     document.getElementById('changedCount').textContent = changedIndices.size;
-    
     const card = document.getElementById(`card-${idx}`);
     if (card) {
         const isChanged = changedIndices.has(idx);
         card.classList.toggle('changed', isChanged);
-        const input = card.querySelector('input');
-        input.classList.toggle('changed-input', isChanged);
+        card.querySelector('.price-input').classList.toggle('changed-input', isChanged);
+    }
+}
+
+function updateComment(idx, val) {
+    allData[idx].comment = val;
+}
+
+function updateBroken(idx, checked) {
+    allData[idx].is_broken = checked;
+    const card = document.getElementById(`card-${idx}`);
+    if (card) card.classList.toggle('broken', checked);
+    saveRow(idx, true);
+}
+
+async function saveRow(idx, immediate) {
+    const row = allData[idx];
+    const hint = document.getElementById(`save-hint-${idx}`);
+    if (hint) { hint.textContent = 'сохраняю…'; hint.className = 'save-hint saving'; }
+    try {
+        const resp = await fetch('/api/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                id: row.id,
+                label: row.label,
+                comment: row.comment || null,
+                is_broken: !!row.is_broken
+            })
+        });
+        const result = await resp.json();
+        if (result.error) {
+            if (hint) { hint.textContent = 'ошибка сохранения'; hint.className = 'save-hint'; }
+            showToast('❌ ' + result.error, false);
+            return;
+        }
+        if (hint) {
+            hint.textContent = 'сохранено ✓';
+            hint.className = 'save-hint saved';
+            setTimeout(() => { if (hint) hint.textContent = ''; }, 1500);
+        }
+    } catch (err) {
+        if (hint) { hint.textContent = 'ошибка сети'; hint.className = 'save-hint'; }
     }
 }
 
 function resetOne(idx) {
-    allData[idx].label = originalData[idx].label;
+    allData[idx].label = allData[idx].original_label;
     changedIndices.delete(idx);
+    saveRow(idx);
     renderCards();
 }
 
-function saveAll() {
+async function resetAll() {
     if (changedIndices.size === 0) {
-        showToast('ℹ️ Нет измененных данных', false);
+        showToast('ℹ️ Нет изменённых цен', false);
         return;
     }
-    showToast(`💾 Зафиксировано изменений: ${changedIndices.size}`);
-}
-
-function resetAll() {
-    if (!confirm('Сбросить все изменения?')) return;
-    allData = JSON.parse(JSON.stringify(originalData));
+    if (!confirm(`Сбросить ${changedIndices.size} изменённых цен к исходным значениям?`)) return;
+    const idxToReset = [...changedIndices];
+    for (const idx of idxToReset) {
+        allData[idx].label = allData[idx].original_label;
+        await saveRow(idx);
+    }
     changedIndices.clear();
-    showToast('↩️ Все изменения сброшены', false);
+    showToast('↩️ Изменения сброшены');
     renderCards();
 }
 
-// !!! ВАЖНО: Экспорт через сервер !!!
 async function exportCSV() {
-    if (allData.length === 0) {
-        showToast('❌ Нет данных для экспорта', false);
-        return;
-    }
-    const response = await fetch('/api/save', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(allData)
-    });
-    const result = await response.json();
-    
-    if (result.error) {
-        showToast('❌ ' + result.error, false);
-        return;
-    }
-    
     const csvResponse = await fetch('/download-csv');
+    if (!csvResponse.ok) {
+        const err = await csvResponse.json().catch(() => ({}));
+        showToast('❌ ' + (err.error || 'Ошибка экспорта'), false);
+        return;
+    }
     const blob = await csvResponse.blob();
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = 'updated_prices.csv';
+    link.download = 'price_checks_export.csv';
     link.click();
-    showToast('📥 Экспортирован новый CSV-файл');
+    showToast('📥 Экспортирован CSV-файл');
 }
 
 // ====================== МОДАЛКА: ФИЛЬТРЫ С СЕРВЕРА ======================
@@ -430,7 +500,6 @@ const modalWrap = document.getElementById('modalWrap');
 const filterGrid = document.getElementById('filterGrid');
 
 async function openModal(src, titleText) {
-    currentImageSrc = src;
     document.getElementById('modalTitle').textContent = titleText;
     modal.style.display = 'flex';
     filterGrid.innerHTML = '<div style="color:#888; padding:40px; grid-column:1/-1;">Обрабатываю варианты на сервере…</div>';
@@ -482,9 +551,7 @@ function closeModal() {
 }
 
 function resetZoom() {
-    scale = 1;
-    panX = 0;
-    panY = 0;
+    scale = 1; panX = 0; panY = 0;
     updateTransform();
 }
 
@@ -493,7 +560,7 @@ function handleModalZoom(e) {
     const zoomIntensity = 0.12;
     if (e.deltaY < 0) scale *= (1 + zoomIntensity);
     else scale /= (1 + zoomIntensity);
-    scale = Math.max(0.3, Math.min(scale, 30)); 
+    scale = Math.max(0.3, Math.min(scale, 30));
     updateTransform();
 }
 
