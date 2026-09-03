@@ -233,9 +233,22 @@
     </div>
 
     <div class="pagination" id="paginationControls" style="display:none;">
+        <button onclick="goToPage(1)" title="Первая страница">⏮ Начало</button>
         <button onclick="changePage(-1)">◀ Назад</button>
         <span id="pageInfo">Страница 1 из 1</span>
+        <input type="number" id="pageJumpInput" min="1" placeholder="№"
+               style="width:56px; background:#1a1d24; color:#e4e6eb; border:1px solid #2a2d36; border-radius:6px; padding:5px 6px; font-size:13px;"
+               onkeydown="if(event.key==='Enter'){jumpToPageInput();}" />
+        <button onclick="jumpToPageInput()">Перейти</button>
         <button onclick="changePage(1)">Вперед ▶</button>
+        <button onclick="goToPage(Infinity)" title="Последняя страница">Конец ⏭</button>
+        <select id="pageSizeSelect" onchange="changePageSize()"
+                style="background:#1a1d24; color:#e4e6eb; border:1px solid #2a2d36; border-radius:6px; padding:5px 8px; font-size:13px;">
+            <option value="60">60/стр</option>
+            <option value="120">120/стр</option>
+            <option value="250">250/стр</option>
+            <option value="500">500/стр</option>
+        </select>
     </div>
 </div>
 
@@ -262,7 +275,7 @@ let selectedIndices = new Set();
 let lastSelectIdx = null;
 let currentModalIdx = null;
 let currentPage = 1;
-const pageSize = 60;
+let pageSize = 60;
 
 let scale = 1, panX = 0, panY = 0;
 let isDragging = false, startX = 0, startY = 0;
@@ -308,10 +321,68 @@ async function loadDataFromServer() {
             if (String(row.label) !== String(row.original_label)) changedIndices.add(idx);
         });
         document.getElementById('fileInfo').textContent = `Записей в базе: ${allData.length}`;
+        restoreStateFromUrl();
         renderCards();
     } catch (err) {
         showToast('❌ Ошибка загрузки данных: ' + err, false);
     }
+}
+
+// ====================== СОСТОЯНИЕ (страница/фильтр/поиск) В URL ======================
+// Чтобы F5 не сбрасывал позицию и чтобы ссылку можно было скопировать/переслать
+// сразу на нужную страницу с нужным фильтром.
+function restoreStateFromUrl() {
+    const params = new URLSearchParams(location.search);
+    const q = params.get('q');
+    const filter = params.get('filter');
+    const pagesize = params.get('pagesize');
+    const page = params.get('page');
+
+    if (q) document.getElementById('searchInput').value = q;
+    if (filter) document.getElementById('filterSelect').value = filter;
+    if (pagesize) {
+        const parsedSize = parseInt(pagesize, 10);
+        if (parsedSize > 0) {
+            pageSize = parsedSize;
+            const sel = document.getElementById('pageSizeSelect');
+            if (sel) sel.value = String(pageSize);
+        }
+    }
+    if (page) {
+        const parsedPage = parseInt(page, 10);
+        if (parsedPage > 0) currentPage = parsedPage;
+    }
+}
+
+function updateUrlState() {
+    const params = new URLSearchParams();
+    params.set('page', currentPage);
+    params.set('pagesize', pageSize);
+    const search = document.getElementById('searchInput').value;
+    const filter = document.getElementById('filterSelect').value;
+    if (search) params.set('q', search);
+    if (filter && filter !== 'all') params.set('filter', filter);
+    const newUrl = `${location.pathname}?${params.toString()}`;
+    history.replaceState(null, '', newUrl);
+}
+
+function jumpToPageInput() {
+    const val = parseInt(document.getElementById('pageJumpInput').value, 10);
+    if (!isNaN(val)) goToPage(val);
+}
+
+function goToPage(n) {
+    const filteredIndices = getFilteredIndices();
+    const totalPages = Math.ceil(filteredIndices.length / pageSize) || 1;
+    currentPage = Math.min(Math.max(1, n), totalPages);
+    renderCards();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function changePageSize() {
+    pageSize = parseInt(document.getElementById('pageSizeSelect').value, 10) || 60;
+    currentPage = 1;
+    renderCards();
 }
 
 function getFileName(url) {
@@ -455,10 +526,12 @@ function renderCards() {
     if (filteredIndices.length > pageSize) {
         pagination.style.display = 'flex';
         document.getElementById('pageInfo').textContent = `Страница ${currentPage} из ${totalPages} (Найдено: ${filteredIndices.length})`;
+        markPagePositionInputs(currentPage, totalPages);
     } else {
         pagination.style.display = 'none';
     }
 
+    updateUrlState();
     schedulePrefetchNextPage(filteredIndices, totalPages);
 }
 
@@ -530,6 +603,14 @@ function changePage(delta) {
     if (currentPage > totalPages) currentPage = totalPages;
     renderCards();
     window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function markPagePositionInputs(currentPage, totalPages) {
+    const jumpInput = document.getElementById('pageJumpInput');
+    if (jumpInput) {
+        jumpInput.max = totalPages;
+        jumpInput.placeholder = String(currentPage);
+    }
 }
 
 function updateLabel(idx, val) {
