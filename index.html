@@ -159,6 +159,7 @@
     <h1>
         💰 Верификация цен
         <small id="fileInfo">Загрузка…</small>
+        <small id="statusInfo" style="color:#555;"></small>
     </h1>
 
     <div class="stats" id="stats">
@@ -170,8 +171,8 @@
     </div>
 
     <div class="toolbar">
-        <label class="file-upload-btn">
-            📂 Добавить из CSV <input type="file" id="csvFileInput" accept=".csv" onchange="handleFileSelect(event)">
+        <label class="file-upload-btn" title="Основные данные уже в Supabase — это только для добавления новых файлов">
+            📂 Импорт CSV (резерв) <input type="file" id="csvFileInput" accept=".csv" onchange="handleFileSelect(event)">
         </label>
         <button class="danger" onclick="resetAll()">↩️ Сбросить изменённые</button>
         <button class="secondary" onclick="exportCSV()">📥 Экспорт CSV</button>
@@ -225,7 +226,29 @@ let isDragging = false, startX = 0, startY = 0;
 
 const debounceTimers = {};
 
-window.addEventListener('DOMContentLoaded', loadDataFromServer);
+window.addEventListener('DOMContentLoaded', () => {
+    loadDataFromServer();
+    loadStatus();
+});
+
+async function loadStatus() {
+    try {
+        const resp = await fetch('/api/status');
+        const s = await resp.json();
+        const el = document.getElementById('statusInfo');
+        if (!el) return;
+        const sourceLabel = s.secrets_source === 'infisical' ? 'Infisical' : 'Render env';
+        if (s.supabase_connected) {
+            el.textContent = `🔐 секреты: ${sourceLabel} · 🗄️ Supabase подключена · строк в базе: ${s.row_count}`;
+            el.style.color = '#3ba363';
+        } else {
+            el.textContent = `🔐 секреты: ${sourceLabel} · ⚠️ Supabase НЕ подключена${s.error ? ' — ' + s.error : ''}`;
+            el.style.color = '#e07a7a';
+        }
+    } catch (err) {
+        // тихо игнорируем — это просто диагностическая строка
+    }
+}
 
 async function loadDataFromServer() {
     try {
@@ -306,7 +329,7 @@ function renderCards() {
     if (pageIndices.length === 0) {
         html = `<div style="grid-column: 1/-1; text-align:center; padding: 40px; color: #888;">Ничего не найдено</div>`;
     } else {
-        pageIndices.forEach(idx => {
+        pageIndices.forEach((idx, posOnPage) => {
             const row = allData[idx];
             const imgSrc = row.url || '';
             const currentLabel = row.label || '';
@@ -315,11 +338,17 @@ function renderCards() {
             const comment = row.comment || '';
             const cardClass = `card ${isChanged ? 'changed' : ''} ${isBroken ? 'broken' : ''}`;
 
+            // Первые ~8 карточек — то, что видно сразу без скролла: грузим их без "lazy"
+            // и с высоким приоритетом, остальные — как обычно, лениво.
+            const isAboveFold = posOnPage < 8;
+            const loadingAttr = isAboveFold ? 'eager' : 'lazy';
+            const priorityAttr = isAboveFold ? 'fetchpriority="high"' : 'fetchpriority="low"';
+
             let imgBlock = '';
             if (imgSrc && imgSrc.length > 3) {
                 imgBlock = `
                 <div class="img-wrap" onclick="openModal('${imgSrc}', '${getFileName(imgSrc)}')">
-                    <img src="/proxy-image?url=${encodeURIComponent(imgSrc)}" loading="lazy" onerror="this.onerror=null; this.alt='⚠️ Ошибка фото';" />
+                    <img src="/proxy-image?url=${encodeURIComponent(imgSrc)}" loading="${loadingAttr}" ${priorityAttr} onerror="this.onerror=null; this.alt='⚠️ Ошибка фото';" />
                     <span class="badge-idx">#${row.id}</span>
                     <span class="badge-edited">✏️ изм.</span>
                 </div>`;
@@ -362,6 +391,40 @@ function renderCards() {
         document.getElementById('pageInfo').textContent = `Страница ${currentPage} из ${totalPages} (Найдено: ${filteredIndices.length})`;
     } else {
         pagination.style.display = 'none';
+    }
+
+    schedulePrefetchNextPage(filteredIndices, totalPages);
+}
+
+// ====================== ТИХАЯ ПРЕДЗАГРУЗКА СЛЕДУЮЩЕЙ СТРАНИЦЫ ======================
+// Фото на /proxy-image отдаются с длинным Cache-Control, поэтому если браузер
+// заранее скачает следующую страницу в фоне (низким приоритетом, в момент простоя),
+// то клик "Вперёд" будет мгновенным — картинки уже в кэше браузера.
+let prefetchToken = 0;
+
+function schedulePrefetchNextPage(filteredIndices, totalPages) {
+    const myToken = ++prefetchToken; // если пользователь опять кликнул/отфильтровал раньше — старую предзагрузку бросаем
+    const runPrefetch = () => {
+        if (myToken !== prefetchToken) return;
+        if (currentPage >= totalPages) return;
+        const nextStart = currentPage * pageSize;
+        const nextIndices = filteredIndices.slice(nextStart, nextStart + pageSize);
+        nextIndices.forEach((idx, i) => {
+            const row = allData[idx];
+            if (!row.url) return;
+            setTimeout(() => {
+                if (myToken !== prefetchToken) return; // страница уже сменилась — не тратим трафик впустую
+                const img = new Image();
+                if ('fetchPriority' in img) img.fetchPriority = 'low';
+                img.src = '/proxy-image?url=' + encodeURIComponent(row.url);
+            }, i * 35); // небольшой разброс — не спамим все 60 запросов одним залпом
+        });
+    };
+
+    if ('requestIdleCallback' in window) {
+        requestIdleCallback(runPrefetch, { timeout: 2000 });
+    } else {
+        setTimeout(runPrefetch, 800);
     }
 }
 

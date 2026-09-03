@@ -1,6 +1,9 @@
 import os
 import io
 import base64
+import threading
+from collections import OrderedDict
+
 import requests
 import numpy as np
 import cv2
@@ -26,12 +29,92 @@ app.add_middleware(
 
 
 # ============================================================
+#   СЕКРЕТЫ: сперва пробуем Infisical (Machine Identity),
+#   при любой проблеме — тихо откатываемся на обычные
+#   переменные окружения Render (они остаются рабочим резервом,
+#   их менять/удалять не нужно).
+# ============================================================
+INFISICAL_CLIENT_ID = os.environ.get("INFISICAL_CLIENT_ID")
+INFISICAL_CLIENT_SECRET = os.environ.get("INFISICAL_CLIENT_SECRET")
+INFISICAL_PROJECT_ID = os.environ.get("INFISICAL_PROJECT_ID")
+INFISICAL_ENVIRONMENT = os.environ.get("ENVIRONMENT") or os.environ.get("INFISICAL_ENVIRONMENT", "dev")
+INFISICAL_HOST = os.environ.get("INFISICAL_HOST", "https://app.infisical.com")
+
+SECRETS_SOURCE = "render_env"  # поменяется на "infisical", если реально получится достать оттуда
+
+
+def _infisical_secret_name(key: str) -> str:
+    """Имя секрета в Infisical можно переопределить переменной
+    INFISICAL_SECRET_NAME_<KEY>, если у тебя там другое название
+    (например, ты хранишь его как SUPABASE_URL_kj123664)."""
+    return os.environ.get(f"INFISICAL_SECRET_NAME_{key}", key)
+
+
+def load_secrets() -> dict:
+    global SECRETS_SOURCE
+    keys = ["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "APP_USER", "APP_PASS"]
+    values = {}
+
+    if INFISICAL_CLIENT_ID and INFISICAL_CLIENT_SECRET and INFISICAL_PROJECT_ID:
+        try:
+            from infisical_sdk import InfisicalSDKClient
+
+            client = InfisicalSDKClient(host=INFISICAL_HOST)
+            client.auth.universal_auth.login(INFISICAL_CLIENT_ID, INFISICAL_CLIENT_SECRET)
+
+            got_any = False
+            for key in keys:
+                secret_name = _infisical_secret_name(key)
+                try:
+                    secret = client.secrets.get_secret_by_name(
+                        secret_name=secret_name,
+                        project_id=INFISICAL_PROJECT_ID,
+                        environment_slug=INFISICAL_ENVIRONMENT,
+                        secret_path="/",
+                    )
+                    value = (
+                        getattr(secret, "secretValue", None)
+                        or getattr(secret, "secret_value", None)
+                        or (secret.get("secretValue") if isinstance(secret, dict) else None)
+                    )
+                    if value:
+                        values[key] = value
+                        got_any = True
+                    else:
+                        print(f"[infisical] секрет '{secret_name}' пустой или не найден")
+                except Exception as e:
+                    print(f"[infisical] не смог получить '{secret_name}': {e}")
+
+            if got_any:
+                SECRETS_SOURCE = "infisical"
+                print("[infisical] секреты успешно получены из Infisical")
+            else:
+                print("[infisical] ни один секрет не получен, использую переменные окружения Render")
+        except Exception as e:
+            print(f"[infisical] подключение не удалось ({e}), использую переменные окружения Render")
+    else:
+        print("[infisical] INFISICAL_CLIENT_ID/SECRET/PROJECT_ID не заданы — работаю на переменных Render")
+
+    # то, что не достали из Infisical (или если Infisical вообще не настроен) — берём из Render
+    for key in keys:
+        if not values.get(key):
+            env_value = os.environ.get(key)
+            if env_value:
+                values[key] = env_value
+
+    return values
+
+
+_SECRETS = load_secrets()
+SUPABASE_URL = _SECRETS.get("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = _SECRETS.get("SUPABASE_SERVICE_KEY")
+APP_USER = _SECRETS.get("APP_USER") or "admin"
+APP_PASS = _SECRETS.get("APP_PASS") or "changeme"
+
+
+# ============================================================
 #           ОБЩИЙ ПАРОЛЬ НА ВСЁ ПРИЛОЖЕНИЕ (HTTP Basic)
 # ============================================================
-APP_USER = os.environ.get("APP_USER", "admin")
-APP_PASS = os.environ.get("APP_PASS", "changeme")
-
-
 class BasicAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         auth = request.headers.get("Authorization")
@@ -58,9 +141,6 @@ app.add_middleware(BasicAuthMiddleware)
 # ============================================================
 #                        SUPABASE
 # ============================================================
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-
 supabase: Client = None
 if SUPABASE_URL and SUPABASE_SERVICE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -69,7 +149,7 @@ if SUPABASE_URL and SUPABASE_SERVICE_KEY:
 def require_supabase():
     if supabase is None:
         raise RuntimeError(
-            "SUPABASE_URL / SUPABASE_SERVICE_KEY не заданы в переменных окружения"
+            "SUPABASE_URL / SUPABASE_SERVICE_KEY не заданы (ни в Infisical, ни в переменных Render)"
         )
 
 
@@ -86,20 +166,81 @@ async def index():
         return HTMLResponse(f.read())
 
 
+@app.get("/api/status")
+async def api_status():
+    """Небольшой диагностический эндпоинт — видно, откуда взялись секреты
+    и реально ли приложение читает/пишет в Supabase."""
+    status = {
+        "secrets_source": SECRETS_SOURCE,
+        "supabase_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_KEY),
+        "supabase_connected": False,
+        "row_count": None,
+    }
+    if supabase is not None:
+        try:
+            result = supabase.table("price_checks").select("id", count="exact").limit(1).execute()
+            status["supabase_connected"] = True
+            status["row_count"] = result.count
+        except Exception as e:
+            status["error"] = str(e)
+    return status
+
+
+# ============================================================
+#          ПРОСТОЙ IN-MEMORY LRU-КЭШ (байты фото / готовые фильтры)
+#   Снимает повторные скачивания с Backblaze и повторный прогон
+#   через OpenCV при повторном открытии тех же фото.
+# ============================================================
+class LRUCache:
+    def __init__(self, maxsize: int):
+        self.maxsize = maxsize
+        self.data = OrderedDict()
+        self.lock = threading.Lock()
+
+    def get(self, key):
+        with self.lock:
+            if key not in self.data:
+                return None
+            self.data.move_to_end(key)
+            return self.data[key]
+
+    def set(self, key, value):
+        with self.lock:
+            self.data[key] = value
+            self.data.move_to_end(key)
+            while len(self.data) > self.maxsize:
+                self.data.popitem(last=False)
+
+
+image_bytes_cache = LRUCache(maxsize=250)   # сырые байты фото с Backblaze
+filters_cache = LRUCache(maxsize=60)        # готовые 14 вариантов обработки (тяжелее по памяти)
+
+IMAGE_CACHE_CONTROL = "public, max-age=604800, immutable"  # неделя — фото по URL не меняются
+
+
 # ============================================================
 #                    ЗАГРУЗКА КАРТИНКИ
 # ============================================================
 def fetch_image_bytes(url: str) -> bytes:
+    cached = image_bytes_cache.get(url)
+    if cached is not None:
+        return cached
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
-    return resp.content
+    content = resp.content
+    image_bytes_cache.set(url, content)
+    return content
 
 
 @app.get("/proxy-image")
 async def proxy_image(url: str):
     try:
         content = fetch_image_bytes(url)
-        return Response(content=content, media_type="image/jpeg")
+        return Response(
+            content=content,
+            media_type="image/jpeg",
+            headers={"Cache-Control": IMAGE_CACHE_CONTROL},
+        )
     except Exception as e:
         return JSONResponse(status_code=404, content={"error": f"Фото не найдено: {e}"})
 
@@ -249,6 +390,14 @@ def encode_png_base64(arr: np.ndarray) -> str:
 
 @app.get("/proxy-filters")
 async def proxy_filters(url: str):
+    cached = filters_cache.get(url)
+    if cached is not None:
+        return Response(
+            content=cached,
+            media_type="application/json",
+            headers={"Cache-Control": IMAGE_CACHE_CONTROL},
+        )
+
     try:
         content = fetch_image_bytes(url)
         arr = np.frombuffer(content, dtype=np.uint8)
@@ -266,16 +415,22 @@ async def proxy_filters(url: str):
         except Exception as e:
             results.append({"key": key, "label": f"{label} — ошибка: {e}", "image": None})
 
-    return {"width": bgr.shape[1], "height": bgr.shape[0], "filters": results}
+    payload = {"width": bgr.shape[1], "height": bgr.shape[0], "filters": results}
+
+    import json
+    body = json.dumps(payload).encode("utf-8")
+    filters_cache.set(url, body)
+
+    return Response(content=body, media_type="application/json", headers={"Cache-Control": IMAGE_CACHE_CONTROL})
 
 
 # ============================================================
-#              ДАННЫЕ — теперь всё живёт в Supabase
+#              ДАННЫЕ — всё живёт в Supabase
 # ============================================================
 @app.post("/upload")
 async def upload_csv(file: UploadFile = File(...)):
-    """Импорт CSV. Строки с уже существующим filename в базе НЕ трогаются
-    (чтобы не затереть чужую разметку/комментарии повторной заливкой)."""
+    """Импорт CSV — резервный/дополнительный способ занести новые файлы.
+    Строки с уже существующим filename в базе НЕ трогаются (не затираем разметку)."""
     try:
         require_supabase()
     except RuntimeError as e:
