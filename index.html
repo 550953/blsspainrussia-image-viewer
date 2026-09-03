@@ -56,6 +56,10 @@
             border-color: #3ba363 !important;
         }
         .card.reviewed .img-wrap { box-shadow: inset 0 0 0 2px rgba(59,163,99,0.5); }
+        .card.placeholder {
+            border-color: #8a5cf6 !important;
+        }
+        .card.placeholder .img-wrap { box-shadow: inset 0 0 0 2px rgba(138,92,246,0.5); }
 
         .select-checkbox {
             position: absolute; top: 4px; left: 6px; z-index: 3;
@@ -74,6 +78,8 @@
         .card .img-wrap .badge-idx { position: absolute; top: 4px; left: 30px; background: rgba(0,0,0,0.8); padding: 1px 6px; border-radius: 4px; font-size: 10px; color: #aaa; z-index: 2; }
         .card .img-wrap .badge-reviewed { position: absolute; bottom: 4px; left: 6px; background: #3ba363; color: #000; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; z-index: 2; display: none; }
         .card.reviewed .img-wrap .badge-reviewed { display: block; }
+        .card .img-wrap .badge-placeholder { position: absolute; bottom: 4px; right: 6px; background: #8a5cf6; color: #fff; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; z-index: 2; display: none; }
+        .card.placeholder .img-wrap .badge-placeholder { display: block; }
         .card .img-wrap .badge-edited { position: absolute; top: 4px; right: 6px; background: #f3c763; color: #000; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; z-index: 2; display: none; }
         .card.changed .img-wrap .badge-edited { display: block; }
 
@@ -84,6 +90,8 @@
         .broken-row + .broken-row { margin-top: -2px; }
         .reviewed-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #ccc; cursor: pointer; user-select: none; }
         .reviewed-row input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-color: #3ba363; }
+        .placeholder-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #ccc; cursor: pointer; user-select: none; }
+        .placeholder-row input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-color: #8a5cf6; }
 
         .control-row {
             display: flex; align-items: center; gap: 6px; background: #0f1117;
@@ -193,6 +201,7 @@
         <span class="badge warn">⚠️ Отличается: <b id="mismatchCount">0</b></span>
         <span class="badge broken">🐞 Забаговано: <b id="brokenCount">0</b></span>
         <span class="badge reviewed-badge" style="background:#1f5a3a;border-color:#3ba363;">👀 Проверено: <b id="reviewedCount">0</b></span>
+        <span class="badge placeholder-badge" style="background:#3d2d5f;border-color:#8a5cf6;">🔳 Коробочки: <b id="placeholderCount">0</b></span>
     </div>
 
     <div class="toolbar">
@@ -213,6 +222,7 @@
             <option value="broken">🐞 Забагованные</option>
             <option value="reviewed">👀 Проверенные</option>
             <option value="unreviewed">🕓 Непроверенные</option>
+            <option value="placeholder">🔳 Коробочки (без цифр)</option>
         </select>
     </div>
 
@@ -338,12 +348,13 @@ function renderCards() {
         return;
     }
 
-    let matchCount = 0, mismatchCount = 0, brokenCount = 0, reviewedCount = 0;
+    let matchCount = 0, mismatchCount = 0, brokenCount = 0, reviewedCount = 0, placeholderCount = 0;
     allData.forEach((row) => {
         if (String(row.label) === String(row.original_label)) matchCount++;
         else mismatchCount++;
         if (row.is_broken) brokenCount++;
         if (row.reviewed) reviewedCount++;
+        if (row.is_placeholder) placeholderCount++;
     });
 
     document.getElementById('totalCount').textContent = allData.length;
@@ -352,6 +363,7 @@ function renderCards() {
     document.getElementById('mismatchCount').textContent = mismatchCount;
     document.getElementById('brokenCount').textContent = brokenCount;
     document.getElementById('reviewedCount').textContent = reviewedCount;
+    document.getElementById('placeholderCount').textContent = placeholderCount;
     document.getElementById('selCount').textContent = selectedIndices.size;
 
     const filteredIndices = getFilteredIndices();
@@ -372,9 +384,10 @@ function renderCards() {
             const isChanged = changedIndices.has(idx);
             const isBroken = !!row.is_broken;
             const isReviewed = !!row.reviewed;
+            const isPlaceholder = !!row.is_placeholder;
             const isSelected = selectedIndices.has(idx);
             const comment = row.comment || '';
-            const cardClass = `card ${isChanged ? 'changed' : ''} ${isBroken ? 'broken' : ''} ${isReviewed ? 'reviewed' : ''} ${isSelected ? 'selected' : ''}`;
+            const cardClass = `card ${isChanged ? 'changed' : ''} ${isBroken ? 'broken' : ''} ${isReviewed ? 'reviewed' : ''} ${isPlaceholder ? 'placeholder' : ''} ${isSelected ? 'selected' : ''}`;
 
             // Первые ~8 карточек — то, что видно сразу без скролла: грузим их без "lazy"
             // и с высоким приоритетом, остальные — как обычно, лениво.
@@ -394,6 +407,7 @@ function renderCards() {
                     <span class="badge-idx">#${row.id}</span>
                     <span class="badge-edited">✏️ изм.</span>
                     <span class="badge-reviewed">👀 ок</span>
+                    <span class="badge-placeholder">🔳 коробочки</span>
                 </div>`;
             } else {
                 imgBlock = `
@@ -423,6 +437,10 @@ function renderCards() {
                     <label class="reviewed-row">
                         <input type="checkbox" ${isReviewed ? 'checked' : ''} onchange="updateReviewed(${idx}, this.checked)" />
                         ✅ проверено (всё ок)
+                    </label>
+                    <label class="placeholder-row">
+                        <input type="checkbox" ${isPlaceholder ? 'checked' : ''} onchange="updatePlaceholder(${idx}, this.checked)" />
+                        🔳 коробочки (цифр нет)
                     </label>
                     <textarea class="comment-input ${comment ? 'has-comment' : ''}" placeholder="комментарий..."
                               oninput="updateComment(${idx}, this.value)" onblur="saveRow(${idx})">${comment}</textarea>
@@ -489,6 +507,7 @@ function getFilteredIndices() {
         const isChanged = changedIndices.has(i);
         const isBroken = !!row.is_broken;
         const isReviewed = !!row.reviewed;
+        const isPlaceholder = !!row.is_placeholder;
 
         if (search && !fname.includes(search) && !currentLabel.toLowerCase().includes(search)) continue;
         if (filter === 'mismatch' && isMatch) continue;
@@ -496,6 +515,7 @@ function getFilteredIndices() {
         if (filter === 'broken' && !isBroken) continue;
         if (filter === 'reviewed' && !isReviewed) continue;
         if (filter === 'unreviewed' && isReviewed) continue;
+        if (filter === 'placeholder' && !isPlaceholder) continue;
 
         filtered.push(i);
     }
@@ -545,6 +565,14 @@ function updateReviewed(idx, checked) {
     if (card) card.classList.toggle('reviewed', checked);
     saveRow(idx, true);
     document.getElementById('reviewedCount').textContent = allData.filter(r => r.reviewed).length;
+}
+
+function updatePlaceholder(idx, checked) {
+    allData[idx].is_placeholder = checked;
+    const card = document.getElementById(`card-${idx}`);
+    if (card) card.classList.toggle('placeholder', checked);
+    saveRow(idx, true);
+    document.getElementById('placeholderCount').textContent = allData.filter(r => r.is_placeholder).length;
 }
 
 // ====================== КОПИРОВАНИЕ ИМЕНИ ФАЙЛА В БУФЕР ======================
@@ -642,7 +670,8 @@ async function saveRow(idx, immediate) {
                 comment: row.comment || null,
                 is_broken: !!row.is_broken,
                 reviewed: !!row.reviewed,
-                best_filter: row.best_filter || null
+                best_filter: row.best_filter || null,
+                is_placeholder: !!row.is_placeholder
             })
         });
         const result = await resp.json();

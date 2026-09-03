@@ -563,7 +563,7 @@ async def update_row(payload: dict):
         return JSONResponse(status_code=400, content={"error": "Нужен id"})
 
     update_fields = {}
-    for key in ("label", "comment", "is_broken", "reviewed", "best_filter"):
+    for key in ("label", "comment", "is_broken", "reviewed", "best_filter", "is_placeholder"):
         if key in payload:
             update_fields[key] = payload[key]
 
