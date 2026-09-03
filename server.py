@@ -326,6 +326,15 @@ def _pct_stretch(arr: np.ndarray, lo: float = 1, hi: float = 99) -> np.ndarray:
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+def _deblock8(gray: np.ndarray) -> np.ndarray:
+    """Убирает JPEG-блочность период-8 (сильно сжатые почти-однотонные фото
+    часто показывают решётку ровно 8x8 px — это не текстура бумаги и не шум,
+    а артефакт квантования DCT-блоков). Обычный blur/denoise его не берёт,
+    т.к. это не случайный шум, а жёсткая периодика — box(8,8) усредняет
+    ровно по периоду и гасит её почти полностью."""
+    return cv2.blur(gray.astype(np.float32), (8, 8))
+
+
 def f_original(bgr):
     return bgr
 
@@ -403,6 +412,32 @@ def f_upscale_sharpen(bgr):
     return sharp
 
 
+def f_deblock_stretch(bgr):
+    """Деблокинг (box 8x8) + растяжка по сером — для фото с явной
+    8-пиксельной решёткой JPEG-компрессии на фоне (не текстура бумаги)."""
+    gray = _to_gray(bgr)
+    deblocked = _deblock8(gray)
+    return _pct_stretch(deblocked)
+
+
+def f_deblock_clahe(bgr):
+    """Деблокинг + CLAHE — локальный контраст без решётки поверх."""
+    gray = _to_gray(bgr)
+    deblocked = _deblock8(gray)
+    stretched = _pct_stretch(deblocked)
+    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
+    return clahe.apply(stretched)
+
+
+def f_deblock_otsu(bgr):
+    """Деблокинг + Otsu — бинарный вариант для тех же зернистых фото."""
+    gray = _to_gray(bgr)
+    deblocked = _deblock8(gray)
+    stretched = _pct_stretch(deblocked)
+    _, otsu = cv2.threshold(stretched, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return otsu
+
+
 FILTERS = [
     ("original", "Оригинал", f_original),
     ("fast_clahe", "CLAHE (по серому)", f_fast_clahe),
@@ -413,6 +448,9 @@ FILTERS = [
     ("clahe_br", "B-R + CLAHE", f_clahe_br),
     ("lab_b_stretch", "LAB b-канал", f_lab_b_stretch),
     ("upscale_sharpen", "Апскейл x3 + резкость", f_upscale_sharpen),
+    ("deblock_stretch", "Деблок 8x8 + растяжка", f_deblock_stretch),
+    ("deblock_clahe", "Деблок 8x8 + CLAHE", f_deblock_clahe),
+    ("deblock_otsu", "Деблок 8x8 + Otsu", f_deblock_otsu),
 ]
 
 
