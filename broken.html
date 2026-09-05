@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>🐞 Проблемные чеки</title>
+<style>
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { font-family:'Segoe UI',system-ui,sans-serif; background:#0f1117; color:#e4e6eb; padding:15px; }
+    .container { max-width:1600px; margin:0 auto; }
+    h1 { font-size:20px; margin-bottom:6px; display:flex; align-items:center; gap:12px; }
+    a.back { color:#4c6ef5; text-decoration:none; font-size:13px; }
+    .summary { color:#888; font-size:13px; margin-bottom:16px; }
+
+    .group { margin-bottom:10px; border:1px solid #2a2d36; border-radius:8px; overflow:hidden; }
+    .group-header {
+        display:flex; align-items:center; justify-content:space-between; padding:10px 14px;
+        background:#1a1d24; cursor:pointer; user-select:none;
+    }
+    .group-header:hover { background:#20232c; }
+    .group-header .title { font-weight:600; font-size:14px; }
+    .group-header .count { background:#7a2d2d; color:#fff; padding:2px 10px; border-radius:10px; font-size:12px; }
+    .group-body { display:none; padding:14px; background:#111319; }
+    .group.open .group-body { display:grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap:12px; }
+    .group.open .chevron { transform: rotate(90deg); }
+    .chevron { transition: transform 0.15s; color:#666; }
+
+    .card { background:#1a1d24; border:1px solid #2a2d36; border-radius:8px; padding:8px; display:flex; flex-direction:column; gap:6px; }
+    .card img { width:100%; height:200px; object-fit:contain; background:#000; border-radius:6px; image-rendering:pixelated; cursor:zoom-in; }
+    .card .fname { font-size:11px; color:#888; word-break:break-all; }
+    .card .label { font-family:monospace; font-size:20px; font-weight:700; color:#f3c763; text-align:center; }
+    .card .comment { font-size:12px; color:#ccc; background:#0f1117; border-radius:4px; padding:6px; min-height:20px; }
+    .card a.open-lab { text-align:center; font-size:12px; padding:6px; border-radius:4px; background:#2a2d36; color:#4c6ef5; text-decoration:none; }
+
+    .toolbar { display:flex; gap:8px; margin-bottom:14px; }
+    .toolbar button { padding:8px 14px; border-radius:6px; border:1px solid #2a2d36; background:#2a2d36; color:#e4e6eb; cursor:pointer; }
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>🐞 Проблемные чеки <a class="back" href="/">← назад к чекам</a></h1>
+    <div class="summary" id="summary">Загрузка…</div>
+    <div class="toolbar">
+        <button onclick="expandAll(true)">Развернуть все группы</button>
+        <button onclick="expandAll(false)">Свернуть все группы</button>
+    </div>
+    <div id="groups"></div>
+</div>
+
+<script>
+async function load() {
+    const resp = await fetch('/api/broken');
+    const data = await resp.json();
+    if (data.error) {
+        document.getElementById('summary').textContent = '❌ ' + data.error;
+        return;
+    }
+    document.getElementById('summary').textContent =
+        `Всего отмечено операторами как забагованные: ${data.total}. Групп по фону: ${data.groups.length}.`;
+
+    const container = document.getElementById('groups');
+    container.innerHTML = data.groups.map((g, gi) => `
+        <div class="group" id="group-${gi}">
+            <div class="group-header" onclick="toggleGroup(${gi})">
+                <span class="title"><span class="chevron">▶</span>&nbsp; ${g.fon_type}</span>
+                <span class="count">${g.count}</span>
+            </div>
+            <div class="group-body">
+                ${g.rows.map(row => `
+                    <div class="card">
+                        <img src="/proxy-image?url=${encodeURIComponent(row.url || '')}"
+                             onclick="window.open('/proxy-image?url=${encodeURIComponent(row.url || '')}','_blank')"
+                             onerror="this.style.display='none'" loading="lazy" />
+                        <div class="fname">${(row.url||'').split('/').pop()}</div>
+                        <div class="label">${row.label ?? ''}</div>
+                        ${row.ocr_checked_at ? `<div style="font-size:11px;color:${row.ocr_mismatch ? '#e07a7a' : '#3ba363'};">🤖 OCR: ${row.ocr_text || '—'}</div>` : ''}
+                        <div class="comment">${row.comment || '<span style="color:#555">без комментария</span>'}</div>
+                        <a class="open-lab" href="/?filter=broken&q=${encodeURIComponent((row.url||'').split('/').pop())}">🎛️ Открыть в фотолабе</a>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `).join('');
+
+    // первая группа (самая массовая) — сразу открыта
+    if (data.groups.length) toggleGroup(0);
+}
+
+function toggleGroup(i) {
+    document.getElementById(`group-${i}`).classList.toggle('open');
+}
+
+function expandAll(open) {
+    document.querySelectorAll('.group').forEach(g => g.classList.toggle('open', open));
+}
+
+load();
+</script>
+</body>
+</html>

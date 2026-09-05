@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>🎛️ Фильтры / рецепты</title>
+<style>
+    * { box-sizing: border-box; margin:0; padding:0; }
+    body { font-family:'Segoe UI',system-ui,sans-serif; background:#0f1117; color:#e4e6eb; padding:15px; }
+    .container { max-width:1200px; margin:0 auto; }
+    h1 { font-size:20px; margin-bottom:14px; display:flex; align-items:center; gap:12px; }
+    a.back { color:#4c6ef5; text-decoration:none; font-size:13px; }
+    .toolbar { display:flex; gap:8px; margin-bottom:14px; }
+    .toolbar button { padding:8px 14px; border-radius:6px; border:1px solid #3ba363; background:#2d8a4e; color:#fff; font-weight:600; cursor:pointer; }
+    select#fonFilter { padding:8px 12px; border-radius:6px; border:1px solid #2a2d36; background:#1a1d24; color:#e4e6eb; }
+
+    table { width:100%; border-collapse:collapse; background:#1a1d24; border-radius:8px; overflow:hidden; }
+    th, td { text-align:left; padding:10px 12px; border-bottom:1px solid #2a2d36; font-size:13px; }
+    th { color:#888; font-weight:600; background:#161920; }
+    tr:hover td { background:#20232c; }
+    .tag { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; }
+    .tag.legacy { background:#3d3d1f; color:#e0d060; }
+    .tag.default { background:#1f5a3a; color:#7fe0a8; }
+    .tag.fon { background:#2a2d36; color:#aaa; }
+    .row-actions button { padding:4px 10px; margin-right:4px; border-radius:4px; border:1px solid #2a2d36; background:#2a2d36; color:#ccc; cursor:pointer; font-size:12px; }
+    .row-actions button.danger { background:#7a2d2d; border-color:#b33b3b; color:#fff; }
+
+    .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,0.7); display:none; align-items:center; justify-content:center; z-index:100; }
+    .modal-box { background:#1a1d24; border:1px solid #2a2d36; border-radius:10px; padding:20px; width:520px; max-width:92vw; max-height:88vh; overflow-y:auto; }
+    .modal-box h3 { margin-bottom:14px; font-size:16px; }
+    .field { margin-bottom:12px; }
+    .field label { display:block; font-size:12px; color:#aaa; margin-bottom:4px; }
+    .field input[type=text], .field textarea, .field select {
+        width:100%; padding:8px; border-radius:6px; border:1px solid #2a2d36; background:#0f1117; color:#eee; font-size:13px;
+    }
+    .field textarea { min-height:50px; resize:vertical; }
+    .field-inline { display:flex; align-items:center; gap:8px; }
+    .params-textarea { font-family:monospace; font-size:12px; min-height:220px; }
+    .modal-actions { display:flex; gap:8px; margin-top:14px; }
+    .modal-actions button { flex:1; padding:9px; border-radius:6px; border:1px solid #2a2d36; cursor:pointer; font-weight:600; }
+    .modal-actions .save { background:#2d8a4e; border-color:#3ba363; color:#fff; }
+    .modal-actions .cancel { background:#2a2d36; color:#ccc; }
+    .hint { font-size:11px; color:#666; margin-top:6px; }
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>🎛️ Фильтры / рецепты <a class="back" href="/">← назад к чекам</a></h1>
+    <p style="color:#888; font-size:13px; margin-bottom:14px;">
+        Рецепт — это набор параметров обработки фото (jsonb), а не код.
+        Новый вариант обработки добавляется здесь, без правки Python.
+        Параметры совпадают с теми, что двигаются ползунками в карточке чека —
+        можно скопировать оттуда, если нашли рабочую комбинацию.
+    </p>
+
+    <div class="toolbar">
+        <button onclick="openEditor(null)">+ Новый рецепт</button>
+        <select id="fonFilter" onchange="loadRecipes()">
+            <option value="">Все категории фона</option>
+        </select>
+    </div>
+
+    <table>
+        <thead>
+            <tr><th>Название</th><th>Фон</th><th>Метки</th><th>Описание</th><th></th></tr>
+        </thead>
+        <tbody id="recipesTbody">
+            <tr><td colspan="5" style="color:#888;">Загрузка…</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<div class="modal-bg" id="editorModal">
+    <div class="modal-box">
+        <h3 id="editorTitle">Новый рецепт</h3>
+        <div class="field">
+            <label>Название</label>
+            <input type="text" id="fName" placeholder="напр. «тёмно-зелёный термопринтер»" />
+        </div>
+        <div class="field">
+            <label>Описание (необязательно)</label>
+            <textarea id="fDescription" placeholder="когда применять, на каком типе фото сработало"></textarea>
+        </div>
+        <div class="field">
+            <label>Привязка к категории фона (fon_type, необязательно)</label>
+            <input type="text" id="fFonType" placeholder="напр. fon_type_13, оставьте пустым для универсального" />
+        </div>
+        <div class="field field-inline">
+            <input type="checkbox" id="fDefault" />
+            <label style="margin:0;">Показывать по умолчанию (даже без совпадения фона)</label>
+        </div>
+        <div class="field">
+            <label>Параметры (JSON) — та же схема, что в панели ползунков</label>
+            <textarea id="fParams" class="params-textarea"></textarea>
+            <div class="hint">Пример: {"mode":"channel","channel":{"r":-1,"g":0,"b":1},"percentile":{"lo":1,"hi":99},"threshold":{"mode":"otsu"}}</div>
+        </div>
+        <div class="modal-actions">
+            <button class="cancel" onclick="closeEditor()">Отмена</button>
+            <button class="save" onclick="saveRecipe()">Сохранить</button>
+        </div>
+    </div>
+</div>
+
+<script>
+let recipes = [];
+let editingId = null;
+
+async function loadRecipes() {
+    const fon = document.getElementById('fonFilter').value;
+    const resp = await fetch('/api/recipes' + (fon ? '?fon_type=' + encodeURIComponent(fon) : ''));
+    recipes = await resp.json();
+    renderTable();
+    populateFonOptions();
+}
+
+function populateFonOptions() {
+    const sel = document.getElementById('fonFilter');
+    const current = sel.value;
+    const fonTypes = [...new Set(recipes.map(r => r.fon_type).filter(Boolean))].sort();
+    sel.innerHTML = '<option value="">Все категории фона</option>' +
+        fonTypes.map(f => `<option value="${f}">${f}</option>`).join('');
+    sel.value = current;
+}
+
+function renderTable() {
+    const tbody = document.getElementById('recipesTbody');
+    if (!recipes.length) {
+        tbody.innerHTML = '<tr><td colspan="5" style="color:#888;">Рецептов пока нет</td></tr>';
+        return;
+    }
+    tbody.innerHTML = recipes.map(r => `
+        <tr>
+            <td><b>${r.name}</b></td>
+            <td>${r.fon_type ? `<span class="tag fon">${r.fon_type}</span>` : '<span style="color:#555;">универсальный</span>'}</td>
+            <td>${r.is_legacy ? '<span class="tag legacy">legacy</span>' : ''} ${r.is_default ? '<span class="tag default">по умолчанию</span>' : ''}</td>
+            <td style="color:#999;max-width:280px;">${r.description || ''}</td>
+            <td class="row-actions">
+                <button onclick="openEditor(${r.id})">Изменить</button>
+                <button class="danger" onclick="deleteRecipe(${r.id})">Удалить</button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function openEditor(id) {
+    editingId = id;
+    const r = id ? recipes.find(x => x.id === id) : null;
+    document.getElementById('editorTitle').textContent = id ? 'Изменить рецепт' : 'Новый рецепт';
+    document.getElementById('fName').value = r ? r.name : '';
+    document.getElementById('fDescription').value = r ? (r.description || '') : '';
+    document.getElementById('fFonType').value = r ? (r.fon_type || '') : '';
+    document.getElementById('fDefault').checked = r ? !!r.is_default : false;
+    document.getElementById('fParams').value = r ? JSON.stringify(r.params, null, 2) : '{\n  "mode": "channel",\n  "channel": {"r": -1, "g": 0, "b": 1},\n  "percentile": {"lo": 1, "hi": 99}\n}';
+    document.getElementById('editorModal').style.display = 'flex';
+}
+
+function closeEditor() {
+    document.getElementById('editorModal').style.display = 'none';
+}
+
+async function saveRecipe() {
+    let params;
+    try {
+        params = JSON.parse(document.getElementById('fParams').value);
+    } catch (e) {
+        alert('Ошибка в JSON параметров: ' + e.message);
+        return;
+    }
+    const payload = {
+        name: document.getElementById('fName').value.trim(),
+        description: document.getElementById('fDescription').value.trim() || null,
+        fon_type: document.getElementById('fFonType').value.trim() || null,
+        is_default: document.getElementById('fDefault').checked,
+        params,
+    };
+    if (!payload.name) { alert('Введите название'); return; }
+
+    if (editingId) {
+        await fetch(`/api/recipes/${editingId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    } else {
+        await fetch('/api/recipes', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    }
+    closeEditor();
+    loadRecipes();
+}
+
+async function deleteRecipe(id) {
+    if (!confirm('Удалить рецепт безвозвратно?')) return;
+    await fetch(`/api/recipes/${id}`, { method:'DELETE' });
+    loadRecipes();
+}
+
+loadRecipes();
+</script>
+</body>
+</html>
