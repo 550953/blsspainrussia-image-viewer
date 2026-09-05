@@ -175,7 +175,16 @@ APP_PASS = _SECRETS.get("APP_PASS") or "changeme"
 #           ОБЩИЙ ПАРОЛЬ НА ВСЁ ПРИЛОЖЕНИЕ (HTTP Basic)
 # ============================================================
 class BasicAuthMiddleware(BaseHTTPMiddleware):
+    # Render (и любой другой оркестратор) стучится на health-check БЕЗ
+    # заголовка Authorization — если этот путь тоже требует Basic Auth,
+    # проверка всегда получает 401, Render считает деплой нездоровым
+    # (именно это видно в логе: "GET /health HTTP/1.1 401 Unauthorized"
+    # по кругу). Поэтому health-check — единственное публичное исключение.
+    PUBLIC_PATHS = {"/health"}
+
     async def dispatch(self, request: Request, call_next):
+        if request.url.path in self.PUBLIC_PATHS:
+            return await call_next(request)
         auth = request.headers.get("Authorization")
         if auth:
             try:
@@ -195,6 +204,13 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(BasicAuthMiddleware)
+
+
+@app.get("/health")
+async def health():
+    """Публичный health-check для Render (без Basic Auth, без обращений к
+    Supabase/Infisical) — просто подтверждает, что процесс жив и отвечает."""
+    return {"status": "ok"}
 
 
 # ============================================================
