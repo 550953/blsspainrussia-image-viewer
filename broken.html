@@ -7,12 +7,23 @@
 <style>
     * { box-sizing:border-box; margin:0; padding:0; }
     body { font-family:'Segoe UI',system-ui,sans-serif; background:#0f1117; color:#e4e6eb; padding:15px; }
-    .container { max-width:1600px; margin:0 auto; }
-    h1 { font-size:20px; margin-bottom:6px; display:flex; align-items:center; gap:12px; }
+    .container { max-width:100%; margin:0 auto; }
+    h1 { font-size:20px; margin-bottom:6px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
     a.back { color:#4c6ef5; text-decoration:none; font-size:13px; }
-    .summary { color:#888; font-size:13px; margin-bottom:16px; }
+    .summary { color:#888; font-size:13px; margin-bottom:12px; }
 
-    .group { margin-bottom:10px; border:1px solid #2a2d36; border-radius:8px; overflow:hidden; }
+    .toolbar { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
+    .toolbar button { padding:8px 14px; border-radius:6px; border:1px solid #2a2d36; background:#2a2d36; color:#e4e6eb; cursor:pointer; font-size:13px; font-weight:600; }
+    .toolbar button:hover { background:#3a3d46; }
+    .toolbar button.primary { background:#3b5998; border-color:#4c6ef5; }
+    .toolbar button.primary:hover { background:#4c6ef5; }
+    .toolbar button.danger { background:#7a2d2d; border-color:#b33b3b; }
+    .toolbar button.danger:hover { background:#9a3b3b; }
+    .toolbar .sel-count { color:#f3c763; font-weight:700; }
+    .toolbar .spacer { flex:1; }
+    .progress-line { font-size:12px; color:#888; min-height:16px; }
+
+    .group { margin-bottom:14px; border:1px solid #2a2d36; border-radius:8px; overflow:hidden; }
     .group-header {
         display:flex; align-items:center; justify-content:space-between; padding:10px 14px;
         background:#1a1d24; cursor:pointer; user-select:none;
@@ -20,20 +31,105 @@
     .group-header:hover { background:#20232c; }
     .group-header .title { font-weight:600; font-size:14px; }
     .group-header .count { background:#7a2d2d; color:#fff; padding:2px 10px; border-radius:10px; font-size:12px; }
-    .group-body { display:none; padding:14px; background:#111319; }
-    .group.open .group-body { display:grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap:12px; }
+    .group-body { display:none; background:#111319; }
+    .group.open .group-body { display:block; }
     .group.open .chevron { transform: rotate(90deg); }
-    .chevron { transition: transform 0.15s; color:#666; }
+    .chevron { transition: transform 0.15s; color:#666; display:inline-block; }
 
-    .card { background:#1a1d24; border:1px solid #2a2d36; border-radius:8px; padding:8px; display:flex; flex-direction:column; gap:6px; }
-    .card img { width:100%; height:200px; object-fit:contain; background:#000; border-radius:6px; image-rendering:pixelated; cursor:zoom-in; }
-    .card .fname { font-size:11px; color:#888; word-break:break-all; }
-    .card .label { font-family:monospace; font-size:20px; font-weight:700; color:#f3c763; text-align:center; }
-    .card .comment { font-size:12px; color:#ccc; background:#0f1117; border-radius:4px; padding:6px; min-height:20px; }
-    .card a.open-lab { text-align:center; font-size:12px; padding:6px; border-radius:4px; background:#2a2d36; color:#4c6ef5; text-decoration:none; }
+    .tbl-wrap { overflow:auto; max-height:76vh; }
+    table.fon-table { border-collapse:separate; border-spacing:0; width:max-content; }
+    table.fon-table th, table.fon-table td { border-bottom:1px solid #22252d; border-right:1px solid #22252d; vertical-align:top; }
 
-    .toolbar { display:flex; gap:8px; margin-bottom:14px; }
-    .toolbar button { padding:8px 14px; border-radius:6px; border:1px solid #2a2d36; background:#2a2d36; color:#e4e6eb; cursor:pointer; }
+    thead th { position:sticky; top:0; z-index:3; background:#181b22; color:#ccc; font-size:11px; font-weight:600;
+        padding:6px; text-align:center; white-space:nowrap; max-width:130px; overflow:hidden; text-overflow:ellipsis; }
+    thead th.sticky-col { left:0; z-index:5; background:#1e222b; text-align:left; }
+
+    td.sticky-col, th.sticky-col { position:sticky; left:0; z-index:2; background:#171a20; width:210px; min-width:210px; max-width:210px; padding:8px; }
+    tr:hover td.sticky-col, tr:hover th.sticky-col { background:#1c2029; }
+
+    tr.row-reviewed td.sticky-col { box-shadow: inset 3px 0 0 #3ba363; }
+    tr.row-broken td.sticky-col { box-shadow: inset 3px 0 0 #b33b3b; }
+    tr.row-selected td.sticky-col { background:#20263a !important; }
+
+    .row-id { font-size:10px; color:#666; }
+    .row-fname { font-size:10.5px; color:#999; word-break:break-all; margin-bottom:4px; cursor:pointer; }
+    .row-fname:hover { color:#4c6ef5; text-decoration:underline; }
+    .row-price { width:100%; padding:5px; border-radius:4px; border:1px solid #2a2d36; background:#0f1117; color:#f3c763;
+        font-size:18px; font-weight:700; font-family:monospace; text-align:center; margin-bottom:5px; }
+    .row-flags { display:flex; gap:8px; font-size:10.5px; color:#ccc; margin-bottom:5px; flex-wrap:wrap; }
+    .row-flags label { display:flex; align-items:center; gap:3px; cursor:pointer; user-select:none; }
+    .row-flags input { width:13px; height:13px; cursor:pointer; }
+    .row-comment { width:100%; font-size:10.5px; padding:4px; border-radius:4px; border:1px solid #2a2d36;
+        background:#0f1117; color:#ddd; resize:vertical; min-height:26px; font-family:inherit; margin-bottom:5px; }
+    .row-scan-btn { width:100%; padding:5px; border-radius:4px; border:1px solid #3a3d46; background:#2d8a4e; color:#fff;
+        font-size:10.5px; font-weight:600; cursor:pointer; }
+    .row-scan-btn:hover { background:#3ba363; }
+    .row-select-line { display:flex; align-items:center; gap:6px; margin-bottom:4px; }
+    .row-select-line input { width:16px; height:16px; cursor:pointer; accent-color:#4c6ef5; }
+    .row-status { font-size:10px; min-height:12px; color:#888; margin-top:3px; }
+
+    td.filter-cell { width:126px; min-width:126px; max-width:126px; padding:5px; text-align:center; }
+    .thumb-wrap { width:114px; height:82px; background:#000; border-radius:4px; overflow:hidden; display:flex;
+        align-items:center; justify-content:center; margin:0 auto 4px; border:1px solid #262930; }
+    .thumb-wrap img { max-width:100%; max-height:100%; object-fit:contain; image-rendering:pixelated; cursor:zoom-in; }
+    .thumb-wrap .ph { font-size:9px; color:#444; }
+    .cell-actions { display:flex; gap:3px; margin-bottom:3px; }
+    .cell-actions button { flex:1; font-size:9.5px; padding:3px 2px; border-radius:3px; border:1px solid #333;
+        background:#1a1d24; color:#ccc; cursor:pointer; }
+    .cell-actions button:hover { background:#3b5998; color:#fff; border-color:#4c6ef5; }
+    .cell-ocr { font-size:10px; font-family:monospace; min-height:13px; }
+    .cell-ocr.match { color:#3ba363; font-weight:700; }
+    .cell-ocr.mismatch { color:#e07a7a; }
+    .cell-ocr.pending { color:#888; }
+    td.filter-cell.cell-match { background:rgba(59,163,99,0.12); }
+    td.filter-cell.cell-checked-active { outline:1px solid #4c6ef5; }
+
+    .toast { position: fixed; bottom: 25px; left: 50%; transform: translateX(-50%); background: #2d8a4e; color: #fff;
+        padding: 10px 24px; border-radius: 10px; font-weight: 500; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+        display: none; z-index: 999; }
+    .toast.error { background: #7a2d2d; }
+
+    /* ---- фотолаборатория (модалка "Изменить") — то же самое, что на главной странице ---- */
+    .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.94); display: none;
+        flex-direction: column; align-items: center; justify-content: center; z-index: 1000; user-select: none; }
+    .modal-header { position: absolute; top: 15px; left: 20px; right: 20px; display: flex;
+        justify-content: space-between; align-items: center; z-index: 1010; pointer-events: none; }
+    .modal-title { font-size: 14px; color: #ccc; background: rgba(0,0,0,0.7); padding: 5px 12px; border-radius: 6px;
+        border: 1px solid #333; pointer-events: auto; }
+    .modal-close { background: #7a2d2d; color: #fff; border: none; padding: 5px 14px; border-radius: 6px;
+        cursor: pointer; font-weight: bold; pointer-events: auto; }
+    .modal-close:hover { background: #9a3b3b; }
+    .modal-content-wrap { position: relative; width: 95vw; height: 80vh; overflow: auto; border: 1px solid #333;
+        border-radius: 10px; background: #000; cursor: grab; }
+    .modal-content-wrap:active { cursor: grabbing; }
+    .lab-wrap { display:flex; gap:16px; padding:20px; width: 96vw; max-width: 1400px; }
+    .lab-preview { flex: 1 1 60%; display:flex; align-items:center; justify-content:center; background:#000;
+        border-radius:8px; min-height: 60vh; overflow:hidden; cursor:grab; }
+    .lab-preview.dragging { cursor: grabbing; }
+    .lab-preview img { max-width:100%; max-height:78vh; image-rendering:pixelated; transform-origin: center center; }
+    .lab-controls { flex: 1 1 40%; max-width: 420px; display:flex; flex-direction:column; gap:10px;
+        overflow-y:auto; max-height:80vh; padding-right:6px; }
+    .lab-section { background:#1a1d24; border:1px solid #2a2d36; border-radius:8px; padding:10px; }
+    .lab-section h4 { font-size:12px; color:#aaa; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; }
+    .lab-row { display:flex; align-items:center; gap:8px; font-size:12px; color:#ccc; margin-bottom:6px; }
+    .lab-row label { flex: 0 0 90px; }
+    .lab-row input[type=range] { flex:1; }
+    .lab-row .val { flex: 0 0 40px; text-align:right; color:#f3c763; font-family:monospace; }
+    .recipe-strip { display:flex; gap:8px; overflow-x:auto; padding-bottom:6px; }
+    .recipe-chip { flex: 0 0 auto; width:110px; cursor:pointer; border:2px solid #2a2d36; border-radius:6px;
+        overflow:hidden; background:#0f1117; text-align:center; }
+    .recipe-chip img { width:100%; height:70px; object-fit:cover; display:block; background:#000; }
+    .recipe-chip .lbl { font-size:10px; padding:3px; color:#ccc; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .recipe-chip.active { border-color:#3ba363; }
+    .lab-actions { display:flex; gap:8px; flex-wrap: wrap; }
+    .lab-actions button { flex:1; min-width: 120px; padding:8px; border-radius:6px; border:1px solid #2a2d36;
+        background:#2d8a4e; color:#fff; cursor:pointer; font-weight:600; font-size:12px; }
+    .lab-actions button.secondary { background:#2a2d36; }
+    .lab-actions button.ocr { background: #3b5998; }
+    .lab-ocr-result { font-size: 12px; color: #ccc; padding: 6px 2px; min-height: 16px; }
+    .modal-filters { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; justify-content: center; z-index: 1010; }
+    .modal-filters button { background: #1a1d24; color: #ccc; border: 1px solid #333; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+    .modal-filters button:hover { background: #3b5998; color: #fff; border-color: #4c6ef5; }
 </style>
 </head>
 <body>
@@ -43,47 +139,164 @@
     <div class="toolbar">
         <button onclick="expandAll(true)">Развернуть все группы</button>
         <button onclick="expandAll(false)">Свернуть все группы</button>
+        <button onclick="toggleSelectAllVisible()">☑️ Выделить всё / снять</button>
+        <span>Выбрано: <span class="sel-count" id="selCount">0</span></span>
+        <div class="spacer"></div>
+        <button class="primary" onclick="bulkRecognize()">🤖 Распознать в ОЦР (для выбранных)</button>
     </div>
+    <div class="progress-line" id="progressLine"></div>
     <div id="groups"></div>
 </div>
 
+<div class="modal" id="imageModal">
+    <div class="modal-header">
+        <div class="modal-title" id="modalTitle">Просмотр фото</div>
+        <button class="modal-close" onclick="closeModal()">✕ Закрыть</button>
+    </div>
+    <div class="modal-content-wrap" id="modalWrap" onwheel="handleModalZoom(event)">
+        <div id="labRoot"></div>
+    </div>
+    <div class="modal-filters">
+        <button onclick="resetZoom()">🔍 Сбросить зум</button>
+    </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
 <script>
+let groups = [];       // [{fon_type, count, rows:[...]}]
+let recipes = [];      // все рецепты (колонки таблицы), из /api/recipes
+let rowsById = {};     // id -> row (для быстрого доступа)
+let selected = new Set();
+let rowScanState = {}; // id -> {scanning:bool, cancel:bool}
+
+// ---- простая очередь конкурентности для батч-превью (не заваливаем 0.1 vCPU Render) ----
+const BATCH_CONCURRENCY = 4;
+let batchQueue = [];
+let batchActive = 0;
+const loadedRows = new Set();
+const loadingRows = new Set();
+
+window.addEventListener('DOMContentLoaded', load);
+
 async function load() {
-    const resp = await fetch('/api/broken');
-    const data = await resp.json();
-    if (data.error) {
-        document.getElementById('summary').textContent = '❌ ' + data.error;
+    document.getElementById('summary').textContent = 'Загрузка…';
+    try {
+        const [brokenResp, recipesResp] = await Promise.all([
+            fetch('/api/broken'),
+            fetch('/api/recipes'),
+        ]);
+        const brokenData = await brokenResp.json();
+        const recipesData = await recipesResp.json();
+
+        if (brokenData.error) {
+            document.getElementById('summary').textContent = '❌ ' + brokenData.error;
+            return;
+        }
+        if (recipesData.error) {
+            document.getElementById('summary').textContent = '❌ ' + recipesData.error;
+            return;
+        }
+
+        groups = brokenData.groups || [];
+        recipes = recipesData || [];
+        groups.forEach(g => g.rows.forEach(r => { rowsById[r.id] = r; }));
+
+        document.getElementById('summary').textContent =
+            `Всего отмечено операторами как забагованные: ${brokenData.total}. Групп по фону: ${groups.length}. Фильтров-колонок: ${recipes.length}.`;
+
+        if (!recipes.length) {
+            document.getElementById('summary').textContent += '  ⚠️ Рецептов (фильтров) в базе нет — сначала создайте их на странице /filters.';
+        }
+
+        renderGroups();
+    } catch (e) {
+        document.getElementById('summary').textContent = '❌ Ошибка загрузки: ' + e;
+    }
+}
+
+function getFileName(url) {
+    if (!url) return '(нет пути)';
+    const clean = String(url).split('?')[0];
+    return clean.substring(clean.lastIndexOf('/') + 1);
+}
+
+function esc(s) {
+    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderGroups() {
+    const container = document.getElementById('groups');
+    if (!groups.length) {
+        container.innerHTML = '<div style="color:#888;padding:20px;">Забагованных чеков нет 🎉</div>';
         return;
     }
-    document.getElementById('summary').textContent =
-        `Всего отмечено операторами как забагованные: ${data.total}. Групп по фону: ${data.groups.length}.`;
 
-    const container = document.getElementById('groups');
-    container.innerHTML = data.groups.map((g, gi) => `
+    container.innerHTML = groups.map((g, gi) => `
         <div class="group" id="group-${gi}">
             <div class="group-header" onclick="toggleGroup(${gi})">
-                <span class="title"><span class="chevron">▶</span>&nbsp; ${g.fon_type}</span>
+                <span class="title"><span class="chevron">▶</span>&nbsp; ${esc(g.fon_type)}</span>
                 <span class="count">${g.count}</span>
             </div>
             <div class="group-body">
-                ${g.rows.map(row => `
-                    <div class="card">
-                        <img src="/proxy-image?url=${encodeURIComponent(row.url || '')}"
-                             onclick="window.open('/proxy-image?url=${encodeURIComponent(row.url || '')}','_blank')"
-                             onerror="this.style.display='none'" loading="lazy" />
-                        <div class="fname">${(row.url||'').split('/').pop()}</div>
-                        <div class="label">${row.label ?? ''}</div>
-                        ${row.ocr_checked_at ? `<div style="font-size:11px;color:${row.ocr_mismatch ? '#e07a7a' : '#3ba363'};">🤖 OCR: ${row.ocr_text || '—'}</div>` : ''}
-                        <div class="comment">${row.comment || '<span style="color:#555">без комментария</span>'}</div>
-                        <a class="open-lab" href="/?filter=broken&q=${encodeURIComponent((row.url||'').split('/').pop())}">🎛️ Открыть в фотолабе</a>
-                    </div>
-                `).join('')}
+                <div class="tbl-wrap">
+                    <table class="fon-table">
+                        <thead>
+                            <tr>
+                                <th class="sticky-col">Чек</th>
+                                ${recipes.map(r => `<th title="${esc(r.name)}${r.fon_type ? ' · фон: ' + esc(r.fon_type) : ''}">${esc(r.name)}</th>`).join('')}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${g.rows.map(row => renderRowHtml(row)).join('')}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     `).join('');
 
-    // первая группа (самая массовая) — сразу открыта
-    if (data.groups.length) toggleGroup(0);
+    setupObservers();
+    // первая (самая массовая) группа — сразу открыта, как и раньше
+    if (groups.length) toggleGroup(0);
+}
+
+function renderRowHtml(row) {
+    const fname = getFileName(row.url || '');
+    const isBroken = !!row.is_broken;
+    const isReviewed = !!row.reviewed;
+    const isSelected = selected.has(row.id);
+    const rowClass = `${isReviewed ? 'row-reviewed' : ''} ${isBroken ? 'row-broken' : ''} ${isSelected ? 'row-selected' : ''}`;
+
+    const cells = recipes.map(r => `
+        <td class="filter-cell" id="cell-${row.id}-${r.id}">
+            <div class="thumb-wrap" onclick="zoomThumb(${row.id}, ${r.id})"><span class="ph">…</span></div>
+            <div class="cell-actions">
+                <button onclick="openLab(${row.id}, ${r.id})" title="Ручная тонкая настройка">✏️ Изм.</button>
+                <button onclick="checkCell(${row.id}, ${r.id})" title="Проверить OCR этим фильтром">🤖 Пров.</button>
+            </div>
+            <div class="cell-ocr" id="ocr-${row.id}-${r.id}"></div>
+        </td>`).join('');
+
+    return `
+        <tr id="row-${row.id}" data-row-id="${row.id}" class="${rowClass}">
+            <td class="sticky-col">
+                <div class="row-select-line">
+                    <input type="checkbox" ${isSelected ? 'checked' : ''} onchange="toggleSelectRow(${row.id}, this.checked)" />
+                    <span class="row-id">#${row.id}</span>
+                </div>
+                <div class="row-fname" title="Клик — скопировать имя файла" onclick="copyFilename(event, '${esc(fname)}')">${esc(fname)}</div>
+                <input class="row-price" maxlength="6" value="${esc(row.label || '')}" onblur="saveLabel(${row.id}, this.value)" />
+                <div class="row-flags">
+                    <label><input type="checkbox" ${isBroken ? 'checked' : ''} onchange="updateField(${row.id}, 'is_broken', this.checked)" /> 🐞 баг</label>
+                    <label><input type="checkbox" ${isReviewed ? 'checked' : ''} onchange="updateField(${row.id}, 'reviewed', this.checked)" /> ✅ ок</label>
+                </div>
+                <textarea class="row-comment" placeholder="комментарий..." onblur="updateField(${row.id}, 'comment', this.value)">${esc(row.comment || '')}</textarea>
+                <button class="row-scan-btn" onclick="recognizeRow(${row.id})">🤖 Все фильтры этой строки</button>
+                <div class="row-status" id="row-status-${row.id}"></div>
+            </td>
+            ${cells}
+        </tr>`;
 }
 
 function toggleGroup(i) {
@@ -94,7 +307,517 @@ function expandAll(open) {
     document.querySelectorAll('.group').forEach(g => g.classList.toggle('open', open));
 }
 
-load();
+function copyFilename(e, fname) {
+    e.stopPropagation();
+    navigator.clipboard?.writeText(fname).then(() => showToast('📋 Имя файла скопировано')).catch(() => {});
+}
+
+// ====================== ВЫДЕЛЕНИЕ СТРОК ======================
+function toggleSelectRow(id, checked) {
+    if (checked) selected.add(id); else selected.delete(id);
+    document.getElementById(`row-${id}`)?.classList.toggle('row-selected', checked);
+    document.getElementById('selCount').textContent = selected.size;
+}
+
+function toggleSelectAllVisible() {
+    // если хоть что-то не выбрано — выделяем всё, иначе снимаем всё
+    const allIds = Object.keys(rowsById).map(Number);
+    const allSelected = allIds.every(id => selected.has(id));
+    if (allSelected) {
+        selected.clear();
+    } else {
+        allIds.forEach(id => selected.add(id));
+    }
+    document.querySelectorAll('tr[data-row-id]').forEach(tr => {
+        const id = Number(tr.dataset.rowId);
+        const checked = selected.has(id);
+        tr.classList.toggle('row-selected', checked);
+        const cb = tr.querySelector('.row-select-line input[type=checkbox]');
+        if (cb) cb.checked = checked;
+    });
+    document.getElementById('selCount').textContent = selected.size;
+}
+
+// ====================== ЛЕНИВАЯ ПОДГРУЗКА ПРЕВЬЮ (IntersectionObserver) ======================
+function setupObservers() {
+    const obs = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (!entry.isIntersecting) return;
+            const id = Number(entry.target.dataset.rowId);
+            enqueueRowThumbnails(id);
+            obs.unobserve(entry.target);
+        });
+    }, { root: null, rootMargin: '400px 0px', threshold: 0.01 });
+
+    document.querySelectorAll('tr[data-row-id]').forEach(tr => obs.observe(tr));
+}
+
+function enqueueRowThumbnails(rowId) {
+    if (loadedRows.has(rowId) || loadingRows.has(rowId) || !recipes.length) return;
+    batchQueue.push(rowId);
+    pumpBatchQueue();
+}
+
+function pumpBatchQueue() {
+    while (batchActive < BATCH_CONCURRENCY && batchQueue.length) {
+        const rowId = batchQueue.shift();
+        if (loadedRows.has(rowId) || loadingRows.has(rowId)) continue;
+        batchActive++;
+        loadingRows.add(rowId);
+        loadRowThumbnails(rowId).finally(() => {
+            batchActive--;
+            loadingRows.delete(rowId);
+            pumpBatchQueue();
+        });
+    }
+}
+
+async function loadRowThumbnails(rowId) {
+    const row = rowsById[rowId];
+    if (!row || !row.url) return;
+    try {
+        const resp = await fetch('/api/apply-recipes-batch', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: row.url, recipes: recipes.map(r => ({ id: r.id, params: r.params })) }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            recipes.forEach(r => setThumbError(rowId, r.id, data.error));
+            return;
+        }
+        (data.results || []).forEach(item => {
+            const wrap = document.querySelector(`#cell-${rowId}-${item.id} .thumb-wrap`);
+            if (!wrap) return;
+            if (item.image) {
+                wrap.innerHTML = `<img src="${item.image}" loading="lazy" onclick="event.stopPropagation(); zoomImg('${item.image}')" />`;
+            } else {
+                wrap.innerHTML = `<span class="ph" title="${esc(item.error || '')}">⚠️</span>`;
+            }
+        });
+        loadedRows.add(rowId);
+    } catch (e) {
+        recipes.forEach(r => setThumbError(rowId, r.id, String(e)));
+    }
+}
+
+function setThumbError(rowId, recipeId, msg) {
+    const wrap = document.querySelector(`#cell-${rowId}-${recipeId} .thumb-wrap`);
+    if (wrap) wrap.innerHTML = `<span class="ph" title="${esc(msg)}">⚠️</span>`;
+}
+
+function zoomImg(src) {
+    window.open(src, '_blank');
+}
+function zoomThumb(rowId, recipeId) {
+    const img = document.querySelector(`#cell-${rowId}-${recipeId} .thumb-wrap img`);
+    if (img) zoomImg(img.src);
+}
+
+// ====================== РЕДАКТИРОВАНИЕ ПОЛЕЙ СТРОКИ ======================
+async function updateField(id, field, value) {
+    const row = rowsById[id];
+    if (!row) return;
+    row[field] = value;
+    document.getElementById(`row-${id}`)?.classList.toggle(field === 'is_broken' ? 'row-broken' : 'row-reviewed',
+        field === 'is_broken' ? !!row.is_broken : (field === 'reviewed' ? !!row.reviewed : document.getElementById(`row-${id}`).classList.contains('row-reviewed')));
+    try {
+        await fetch('/api/update', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, [field]: value }),
+        });
+    } catch (e) {
+        showToast('❌ Не удалось сохранить: ' + e, false);
+    }
+}
+
+async function saveLabel(id, value) {
+    const row = rowsById[id];
+    if (!row) return;
+    row.label = value.trim();
+    try {
+        await fetch('/api/update', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, label: row.label }),
+        });
+        showToast('💾 Цена сохранена');
+    } catch (e) {
+        showToast('❌ Ошибка сохранения: ' + e, false);
+    }
+}
+
+async function markUsed(rowId, recipeId) {
+    const row = rowsById[rowId];
+    try {
+        await fetch(`/api/recipes/${recipeId}/mark-used`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: rowId }),
+        });
+        if (row) { row.reviewed = true; row.best_recipe_id = recipeId; }
+        const tr = document.getElementById(`row-${rowId}`);
+        tr?.classList.add('row-reviewed');
+        const cb = tr?.querySelector('.row-flags input[type=checkbox]');
+        if (cb) cb.checked = true;
+    } catch (e) { /* тихо */ }
+}
+
+// ====================== ПРОВЕРКА OCR ПО ОДНОЙ ЯЧЕЙКЕ ======================
+async function checkCell(rowId, recipeId) {
+    const row = rowsById[rowId];
+    const recipe = recipes.find(r => r.id === recipeId);
+    if (!row || !recipe) return;
+    const ocrEl = document.getElementById(`ocr-${rowId}-${recipeId}`);
+    const cellEl = document.getElementById(`cell-${rowId}-${recipeId}`);
+    if (ocrEl) { ocrEl.textContent = '🤖 …'; ocrEl.className = 'cell-ocr pending'; }
+    try {
+        const resp = await fetch('/api/ocr-check', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: row.url, params: recipe.params }),
+        });
+        const data = await resp.json();
+        const label = String(row.label || '');
+        const digits = data.digits;
+        const matches = !!(digits && label && digits.replace(/^0+/, '') === label.replace(/^0+/, ''));
+        if (ocrEl) {
+            ocrEl.textContent = digits ? digits : '—';
+            ocrEl.className = 'cell-ocr ' + (digits ? (matches ? 'match' : 'mismatch') : 'mismatch');
+        }
+        cellEl?.classList.toggle('cell-match', matches);
+        if (matches) await markUsed(rowId, recipeId);
+        return matches;
+    } catch (e) {
+        if (ocrEl) { ocrEl.textContent = '❌'; ocrEl.className = 'cell-ocr mismatch'; }
+        return false;
+    }
+}
+
+// ====================== "РАСПОЗНАТЬ В ОЦР": перебор всех фильтров строки с ранним выходом ======================
+async function recognizeRow(rowId) {
+    if (rowScanState[rowId]?.scanning) return;
+    rowScanState[rowId] = { scanning: true };
+    const statusEl = document.getElementById(`row-status-${rowId}`);
+    // сначала убеждаемся, что превью подгружены (чтобы миниатюры не остались пустыми)
+    if (!loadedRows.has(rowId)) { await loadRowThumbnails(rowId); }
+    let found = false;
+    for (let i = 0; i < recipes.length; i++) {
+        if (!rowScanState[rowId]?.scanning) break; // отменено
+        const r = recipes[i];
+        if (statusEl) statusEl.textContent = `🤖 сканирую ${i + 1}/${recipes.length}: ${r.name}…`;
+        const matched = await checkCell(rowId, r.id);
+        if (matched) { found = true; break; }
+    }
+    if (statusEl) statusEl.textContent = found ? '✅ найден рабочий фильтр' : '⚠️ ни один фильтр не совпал — нужна ручная настройка';
+    rowScanState[rowId] = { scanning: false };
+    return found;
+}
+
+async function bulkRecognize() {
+    if (!selected.size) { showToast('Сначала выделите строки галочкой слева', false); return; }
+    const ids = Array.from(selected);
+    const progressEl = document.getElementById('progressLine');
+    let done = 0, matched = 0;
+    for (const id of ids) {
+        progressEl.textContent = `🤖 Распознаю ${done + 1}/${ids.length} (чек #${id})…`;
+        const ok = await recognizeRow(id);
+        if (ok) matched++;
+        done++;
+    }
+    progressEl.textContent = `Готово: обработано ${done}, найден рабочий фильтр для ${matched}, не найден для ${done - matched}.`;
+    showToast(`🤖 Готово: ${matched}/${done} чеков распознано`);
+}
+
+function showToast(msg, success = true) {
+    const toast = document.getElementById('toast');
+    toast.textContent = msg;
+    toast.className = 'toast' + (success ? '' : ' error');
+    toast.style.display = 'block';
+    clearTimeout(toast._timer);
+    toast._timer = setTimeout(() => { toast.style.display = 'none'; }, 2500);
+}
+
+// ====================== МОДАЛКА "ИЗМЕНИТЬ" (ручная тонкая настройка) ======================
+const modal = document.getElementById('imageModal');
+const modalWrap = document.getElementById('modalWrap');
+const labRoot = document.getElementById('labRoot');
+
+let scale = 1, panX = 0, panY = 0;
+let isDragging = false, startX = 0, startY = 0;
+
+let labState = {
+    rowId: null, url: null, fonType: null,
+    params: { mode: 'channel', channel: { r: -1, g: 0, b: 1 }, percentile: { lo: 1, hi: 99 } },
+    activeRecipeId: null, debounceTimer: null,
+};
+
+function openLab(rowId, recipeId) {
+    const row = rowsById[rowId];
+    const recipe = recipes.find(r => r.id === recipeId);
+    if (!row) return;
+    initRecipeLab(rowId, row.url, getFileName(row.url), row.fon_type, recipe ? JSON.parse(JSON.stringify(recipe.params)) : null, recipeId);
+}
+
+function initRecipeLab(rowId, src, titleText, fonType, startParams, startRecipeId) {
+    labState.rowId = rowId;
+    labState.url = src;
+    labState.fonType = fonType || null;
+    labState.activeRecipeId = startRecipeId || null;
+    if (startParams) labState.params = startParams;
+    document.getElementById('modalTitle').textContent = titleText + (fonType ? `  ·  фон: ${fonType}` : '');
+    modal.style.display = 'flex';
+    scale = 1; panX = 0; panY = 0;
+    updateTransform();
+
+    labRoot.innerHTML = `
+      <div class="lab-wrap">
+        <div class="lab-preview"><img id="labPreviewImg" src="/proxy-image?url=${encodeURIComponent(src)}" /></div>
+        <div class="lab-controls">
+          <div class="lab-section">
+            <h4>Рецепты для этого фона</h4>
+            <div class="recipe-strip" id="recipeStrip">Загружаю…</div>
+          </div>
+          <div class="lab-section">
+            <h4>Ручная настройка</h4>
+            <div id="labControls"></div>
+          </div>
+          <div class="lab-actions">
+            <button onclick="saveAsNewRecipe()">💾 Сохранить как новый рецепт</button>
+            <button class="secondary" onclick="updateActiveRecipe()" id="updateRecipeBtn" style="display:none;">↻ Обновить текущий</button>
+            <button class="ocr" onclick="checkLabOcr()" title="Прогоняет OCR по текущей настройке ползунков">🤖 Проверить OCR</button>
+          </div>
+          <div class="lab-ocr-result" id="labOcrResult"></div>
+        </div>
+      </div>`;
+
+    renderLabControls();
+    scheduleApplyRecipe(true);
+    loadRecipeStrip();
+}
+
+function loadRecipeStrip() {
+    const strip = document.getElementById('recipeStrip');
+    if (!recipes.length) { strip.innerHTML = '<div style="color:#666;font-size:11px;">Рецептов пока нет</div>'; return; }
+    strip.innerHTML = '';
+    // рецепты своего фона — вперёд
+    const ordered = [...recipes].sort((a, b) => {
+        const am = a.fon_type === labState.fonType ? 0 : 1;
+        const bm = b.fon_type === labState.fonType ? 0 : 1;
+        return am - bm;
+    });
+    ordered.forEach(r => {
+        const chip = document.createElement('div');
+        chip.className = 'recipe-chip' + (r.id === labState.activeRecipeId ? ' active' : '');
+        chip.id = `recipe-chip-${r.id}`;
+        chip.innerHTML = `<img id="recipe-thumb-${r.id}" /><div class="lbl">${esc(r.name)}</div>`;
+        chip.onclick = () => applyExistingRecipe(r);
+        strip.appendChild(chip);
+        fetch('/api/apply-recipe', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: labState.url, params: r.params }),
+        }).then(res => res.json()).then(d => {
+            const img = document.getElementById(`recipe-thumb-${r.id}`);
+            if (img && d.image) img.src = d.image;
+        }).catch(() => {});
+    });
+    if (labState.activeRecipeId) document.getElementById('updateRecipeBtn').style.display = 'block';
+}
+
+function applyExistingRecipe(recipe) {
+    labState.params = JSON.parse(JSON.stringify(recipe.params));
+    labState.activeRecipeId = recipe.id;
+    document.querySelectorAll('.recipe-chip').forEach(c => c.classList.remove('active'));
+    document.getElementById(`recipe-chip-${recipe.id}`)?.classList.add('active');
+    document.getElementById('updateRecipeBtn').style.display = 'block';
+    document.getElementById('labOcrResult').textContent = '';
+    renderLabControls();
+    scheduleApplyRecipe(true);
+    markUsed(labState.rowId, recipe.id);
+}
+
+function renderLabControls() {
+    const p = labState.params;
+    const c = document.getElementById('labControls');
+    const mode = p.mode || 'channel';
+    c.innerHTML = `
+      <div class="lab-row"><label>Режим</label>
+        <select onchange="setParam('mode', this.value)" style="flex:1;background:#0f1117;color:#eee;border:1px solid #2a2d36;border-radius:4px;">
+          <option value="channel" ${mode==='channel'?'selected':''}>Канал (R/G/B формула)</option>
+          <option value="gray" ${mode==='gray'?'selected':''}>Серый (+ авто-инверсия)</option>
+          <option value="lab_b" ${mode==='lab_b'?'selected':''}>LAB b-канал</option>
+          <option value="auto" ${mode==='auto'?'selected':''}>Авто-подбор канала</option>
+          <option value="raw" ${mode==='raw'?'selected':''}>Оригинал (без обработки)</option>
+        </select>
+      </div>
+      ${mode==='channel' ? sliderRow('R вес', 'channel.r', p.channel?.r ?? -1, -2, 2, 0.1)
+                          + sliderRow('G вес', 'channel.g', p.channel?.g ?? 0, -2, 2, 0.1)
+                          + sliderRow('B вес', 'channel.b', p.channel?.b ?? 1, -2, 2, 0.1) : ''}
+      ${mode==='gray' ? checkRow('Авто-инверсия', 'auto_invert', p.auto_invert !== false) : ''}
+      ${sliderRow('Percentile lo', 'percentile.lo', p.percentile?.lo ?? 1, 0, 40, 1)}
+      ${sliderRow('Percentile hi', 'percentile.hi', p.percentile?.hi ?? 99, 60, 100, 1)}
+      ${checkRow('Деблок 8×8 (JPEG-решётка)', 'deblock.enabled', !!p.deblock?.enabled)}
+      ${p.deblock?.enabled ? sliderRow('  размер блока', 'deblock.ksize', p.deblock?.ksize ?? 8, 2, 16, 1) : ''}
+      ${checkRow('CLAHE (локальный контраст)', 'clahe.enabled', !!p.clahe?.enabled)}
+      ${p.clahe?.enabled ? sliderRow('  clip', 'clahe.clip', p.clahe?.clip ?? 3.5, 0.5, 8, 0.1)
+                          + sliderRow('  tile', 'clahe.tile', p.clahe?.tile ?? 8, 2, 16, 1) : ''}
+      ${checkRow('Bilateral (шумодав)', 'bilateral.enabled', !!p.bilateral?.enabled)}
+      <div class="lab-row"><label>Порог</label>
+        <select onchange="setParam('threshold.mode', this.value)" style="flex:1;background:#0f1117;color:#eee;border:1px solid #2a2d36;border-radius:4px;">
+          <option value="none" ${(!p.threshold||p.threshold.mode==='none')?'selected':''}>Нет</option>
+          <option value="otsu" ${p.threshold?.mode==='otsu'?'selected':''}>Otsu (авто)</option>
+          <option value="adaptive" ${p.threshold?.mode==='adaptive'?'selected':''}>Адаптивный</option>
+          <option value="manual" ${p.threshold?.mode==='manual'?'selected':''}>Ручной</option>
+        </select>
+      </div>
+      ${p.threshold?.mode==='manual' ? sliderRow('  значение', 'threshold.value', p.threshold?.value ?? 128, 0, 255, 1) : ''}
+      ${p.threshold?.mode!=='none' ? checkRow('Морфология (чистка точек)', 'morphology.enabled', !!p.morphology?.enabled) : ''}
+      ${checkRow('Инвертировать результат', 'manual_invert', !!p.manual_invert)}
+      ${sliderRow('Апскейл ×', 'upscale.factor', p.upscale?.factor ?? 1, 1, 4, 0.5)}
+      ${(p.upscale?.factor ?? 1) > 1 ? sliderRow('  резкость', 'upscale.sharpen', p.upscale?.sharpen ?? 0, 0, 2, 0.1) : ''}
+    `;
+}
+
+function sliderRow(label, path, value, min, max, step) {
+    return `<div class="lab-row"><label>${label}</label>
+      <input type="range" min="${min}" max="${max}" step="${step}" value="${value}"
+             oninput="setParam('${path}', parseFloat(this.value)); this.nextElementSibling.textContent = this.value;" />
+      <span class="val">${value}</span></div>`;
+}
+function checkRow(label, path, checked) {
+    return `<div class="lab-row"><label>${label}</label>
+      <input type="checkbox" ${checked?'checked':''} onchange="setParam('${path}', this.checked); renderLabControls();" /></div>`;
+}
+
+function setParam(path, value) {
+    const parts = path.split('.');
+    let cur = labState.params;
+    for (let i = 0; i < parts.length - 1; i++) {
+        if (!cur[parts[i]]) cur[parts[i]] = {};
+        cur = cur[parts[i]];
+    }
+    cur[parts[parts.length - 1]] = value;
+    labState.activeRecipeId = null;
+    document.querySelectorAll('.recipe-chip').forEach(c => c.classList.remove('active'));
+    document.getElementById('updateRecipeBtn').style.display = 'none';
+    document.getElementById('labOcrResult').textContent = '';
+    scheduleApplyRecipe(false);
+}
+
+function scheduleApplyRecipe(immediate) {
+    clearTimeout(labState.debounceTimer);
+    const run = async () => {
+        try {
+            const resp = await fetch('/api/apply-recipe', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ url: labState.url, params: labState.params })
+            });
+            const data = await resp.json();
+            if (data.image) document.getElementById('labPreviewImg').src = data.image;
+        } catch (e) { /* тихо */ }
+    };
+    if (immediate) run(); else labState.debounceTimer = setTimeout(run, 200);
+}
+
+async function saveAsNewRecipe() {
+    const name = prompt('Название нового рецепта (например: "тёмно-зелёный термопринтер"):');
+    if (!name) return;
+    const resp = await fetch('/api/recipes', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ name, params: labState.params, fon_type: labState.fonType })
+    });
+    const created = await resp.json();
+    showToast('💾 Рецепт сохранён: ' + name);
+    if (created && created.id) {
+        recipes.push(created);
+        loadedRows.clear(); // новый рецепт — старые строки надо перерисовать с новой колонкой
+        renderGroups();
+        await markUsed(labState.rowId, created.id);
+    }
+}
+
+async function updateActiveRecipe() {
+    if (!labState.activeRecipeId) return;
+    const chip = document.querySelector(`#recipe-chip-${labState.activeRecipeId} .lbl`);
+    await fetch(`/api/recipes/${labState.activeRecipeId}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ name: chip ? chip.textContent : 'рецепт', params: labState.params })
+    });
+    const r = recipes.find(r => r.id === labState.activeRecipeId);
+    if (r) r.params = JSON.parse(JSON.stringify(labState.params));
+    loadedRows.clear();
+    showToast('↻ Рецепт обновлён — миниатюры обновятся при следующей прокрутке');
+    loadRecipeStrip();
+}
+
+async function checkLabOcr() {
+    const resultEl = document.getElementById('labOcrResult');
+    resultEl.textContent = '🤖 распознаю…';
+    resultEl.style.color = '#888';
+    try {
+        const resp = await fetch('/api/ocr-check', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ url: labState.url, params: labState.params })
+        });
+        const data = await resp.json();
+        if (data.error && !data.digits) {
+            resultEl.textContent = '🤖 ' + data.error;
+            resultEl.style.color = '#e07a7a';
+            return;
+        }
+        const row = rowsById[labState.rowId];
+        const label = row ? String(row.label || '') : '';
+        const matches = data.digits && label && data.digits.replace(/^0+/, '') === label.replace(/^0+/, '');
+        resultEl.textContent = `🤖 OCR видит: ${data.digits || '—'}` + (label ? (matches ? '  ✅ совпадает с ценой' : '  ⚠️ не совпадает с ценой') : '');
+        resultEl.style.color = matches ? '#3ba363' : (data.digits ? '#f3c763' : '#e07a7a');
+    } catch (e) {
+        resultEl.textContent = '🤖 ошибка запроса: ' + e;
+        resultEl.style.color = '#e07a7a';
+    }
+}
+
+function closeModal() {
+    modal.style.display = 'none';
+    // если по строке был активирован/обновлён рецепт — перечитаем её превью
+    if (labState.rowId != null) {
+        loadedRows.delete(labState.rowId);
+        enqueueRowThumbnails(labState.rowId);
+    }
+}
+
+function resetZoom() { scale = 1; panX = 0; panY = 0; updateTransform(); }
+
+function handleModalZoom(e) {
+    if (!modalPanZoomTarget(e)) return;
+    e.preventDefault();
+    const zoomIntensity = 0.12;
+    if (e.deltaY < 0) scale *= (1 + zoomIntensity);
+    else scale /= (1 + zoomIntensity);
+    scale = Math.max(0.3, Math.min(scale, 30));
+    updateTransform();
+}
+
+function updateTransform() {
+    const img = document.getElementById('labPreviewImg');
+    if (img) img.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+}
+
+function modalPanZoomTarget(e) { return e.target.closest('.lab-preview'); }
+
+modalWrap.addEventListener('mousedown', (e) => {
+    if (!modalPanZoomTarget(e)) return;
+    isDragging = true;
+    startX = e.clientX - panX;
+    startY = e.clientY - panY;
+    e.currentTarget.querySelector('.lab-preview')?.classList.add('dragging');
+});
+window.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    panX = e.clientX - startX;
+    panY = e.clientY - startY;
+    updateTransform();
+});
+window.addEventListener('mouseup', () => {
+    isDragging = false;
+    modalWrap.querySelector('.lab-preview')?.classList.remove('dragging');
+});
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 </script>
 </body>
 </html>

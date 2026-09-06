@@ -543,6 +543,52 @@ async def api_apply_recipe(payload: ApplyRecipeRequest):
         return JSONResponse(status_code=500, content={"error": f"Ошибка обработки: {e}"})
 
 
+class RecipeThumbItem(BaseModel):
+    id: object  # int (recipe id) — object чтобы не падать, если фронт когда-нибудь пришлёт строку
+    params: dict
+
+
+class ApplyRecipesBatchRequest(BaseModel):
+    url: str
+    recipes: list[RecipeThumbItem]
+    max_side: Optional[int] = 240  # уменьшаем превью перед кодированием — это просто миниатюра для сетки
+
+
+def _shrink_for_thumb(out: np.ndarray, max_side: int) -> np.ndarray:
+    if max_side and max_side > 0:
+        h, w = out.shape[:2]
+        longest = max(h, w)
+        if longest > max_side:
+            scale = max_side / float(longest)
+            out = cv2.resize(out, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+    return out
+
+
+@app.post("/api/apply-recipes-batch")
+async def api_apply_recipes_batch(payload: ApplyRecipesBatchRequest):
+    """Как /api/apply-recipe, но для ОДНОГО фото сразу считает превью ПОД
+    ВЕСЬ набор рецептов за один HTTP-запрос (картинка скачивается/декодируется
+    один раз). Нужно для таблицы 'фото × все фильтры' (аналог экспортированного
+    экселя, но живьём в браузере) — без этого пришлось бы делать по одному
+    запросу на каждую ячейку таблицы, что на 0.1 vCPU Render убило бы страницу."""
+    try:
+        bgr = fetch_image_bgr(payload.url)
+        if bgr is None:
+            return JSONResponse(status_code=400, content={"error": "Не удалось декодировать изображение"})
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": f"Не удалось скачать фото: {e}"})
+
+    results = []
+    for item in payload.recipes:
+        try:
+            out = apply_recipe(bgr, item.params)
+            out = _shrink_for_thumb(out, payload.max_side or 240)
+            results.append({"id": item.id, "image": encode_png_base64(out)})
+        except Exception as e:
+            results.append({"id": item.id, "error": str(e)})
+    return {"results": results, "width": bgr.shape[1], "height": bgr.shape[0]}
+
+
 class RecipeIn(BaseModel):
     name: str
     description: Optional[str] = None
