@@ -161,6 +161,15 @@
 
         #filterGrid { transform-origin: top left; }
 
+        /* ---- pan/zoom теперь только на самом превью чека, не на всей лаборатории:
+           раньше transform вешался на #filterGrid целиком (картинка+ползунки+кнопки),
+           поэтому "зум колесом"/"таскание мышкой" масштабировали и двигали ВЕСЬ
+           попап, включая панель с ползунками — ползунок мышкой было не взять,
+           клик по нему стартовал общий pan. ---- */
+        .lab-preview { overflow: hidden; cursor: grab; }
+        .lab-preview.dragging { cursor: grabbing; }
+        .lab-preview img { transform-origin: center center; }
+
         .modal-filters { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; justify-content: center; z-index: 1010; }
         .modal-filters button {
             background: #1a1d24; color: #ccc; border: 1px solid #333; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px;
@@ -1140,6 +1149,7 @@ function resetZoom() {
 }
 
 function handleModalZoom(e) {
+    if (!modalPanZoomTarget(e)) return;  // не над превью — например, скролл списка ползунков: ничего не трогаем
     e.preventDefault();
     const zoomIntensity = 0.12;
     if (e.deltaY < 0) scale *= (1 + zoomIntensity);
@@ -1149,13 +1159,24 @@ function handleModalZoom(e) {
 }
 
 function updateTransform() {
-    filterGrid.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+    const img = document.getElementById('labPreviewImg');
+    if (img) img.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+}
+
+function modalPanZoomTarget(e) {
+    // Раньше эти обработчики висели на всём попапе (modalWrap), поэтому
+    // клик/скролл где угодно — хоть на ползунке в панели справа — двигал
+    // и масштабировал картинку. Теперь pan/zoom работает, только если
+    // событие реально произошло над самим превью чека.
+    return e.target.closest('.lab-preview');
 }
 
 modalWrap.addEventListener('mousedown', (e) => {
+    if (!modalPanZoomTarget(e)) return;
     isDragging = true;
     startX = e.clientX - panX;
     startY = e.clientY - panY;
+    e.currentTarget.querySelector('.lab-preview')?.classList.add('dragging');
 });
 
 window.addEventListener('mousemove', (e) => {
@@ -1165,7 +1186,10 @@ window.addEventListener('mousemove', (e) => {
     updateTransform();
 });
 
-window.addEventListener('mouseup', () => { isDragging = false; });
+window.addEventListener('mouseup', () => {
+    isDragging = false;
+    modalWrap.querySelector('.lab-preview')?.classList.remove('dragging');
+});
 window.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
 function showToast(msg, success = true) {
