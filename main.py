@@ -418,6 +418,17 @@ def _post_to_remote_ocr(image_bytes: bytes, timeout: float):
     )
 
 
+def _retry_after_seconds(resp, default: float = 5.0, cap: float = 15.0) -> float:
+    """Читает Retry-After из ответа 429, если сервер его прислал."""
+    header = resp.headers.get("Retry-After") if resp is not None else None
+    if header:
+        try:
+            return min(float(header), cap)
+        except ValueError:
+            pass
+    return default
+
+
 def extract_via_remote_ocr(image_bytes: bytes):
     """Отправляет уже готовые байты картинки (PNG/JPEG — не важно) на
     внешний OCR и вытаскивает из ответа только цифры.
@@ -428,6 +439,19 @@ def extract_via_remote_ocr(image_bytes: bytes):
     t0 = time.monotonic()
     try:
         resp = _post_to_remote_ocr(image_bytes, OCR_REMOTE_TIMEOUT)
+        if resp.status_code == 429:
+            wait_s = _retry_after_seconds(resp)
+            print(f"[remote_ocr] 429 Too Many Requests — жду {wait_s:.1f}с и пробую ещё раз")
+            time.sleep(wait_s)
+            t0 = time.monotonic()
+            resp = _post_to_remote_ocr(image_bytes, OCR_REMOTE_TIMEOUT)
+            if resp.status_code == 429:
+                print(f"[remote_ocr] снова 429 после ожидания {wait_s:.1f}с — сдаюсь")
+                return None, (
+                    "OCR-сервис ограничивает частоту запросов (429 Too Many Requests) — "
+                    "похоже, у bls.shikinn.com/ocr включён rate limit. Подождите между "
+                    "проверками или ослабьте лимит на самом сервисе."
+                )
         resp.raise_for_status()
         print(f"[remote_ocr] ok за {time.monotonic() - t0:.1f}с, status={resp.status_code}")
     except requests.exceptions.Timeout:
