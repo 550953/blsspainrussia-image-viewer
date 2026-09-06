@@ -1,21 +1,44 @@
 import os
 import io
+import re
+import gc
+import time
 import base64
 import threading
 from collections import OrderedDict
+from typing import Optional
 
 import requests
 import numpy as np
 import cv2
+
+# Render free tier = 0.1 shared vCPU. Без этого numpy/OpenCV/Tesseract
+# каждый норовят открыть свой пул потоков — на одном слабом ядре это
+# только съедает время на переключение контекста и лишнюю память,
+# выигрыша в скорости всё равно нет.
+cv2.setNumThreads(1)
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")  # тот же лимит для tesseract (LSTM тоже через OpenMP)
+
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import HTMLResponse, Response, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response as StarletteResponse
+from pydantic import BaseModel
 import pandas as pd
 import uvicorn
 from supabase import create_client, Client
+
+from filters_engine import apply_recipe
+# Локальный pytesseract (ocr_engine.py) больше не используется в эндпоинтах —
+# распознавание теперь идёт через внешний сервис (см. OCR_REMOTE_URL ниже).
+# Импорт оставлен закомментированным на случай, если понадобится откат:
+# from ocr_engine import extract_digits_from_array, extract_price_from_bgr
 
 app = FastAPI()
 
@@ -156,7 +179,16 @@ APP_PASS = _SECRETS.get("APP_PASS") or "changeme"
 #           ОБЩИЙ ПАРОЛЬ НА ВСЁ ПРИЛОЖЕНИЕ (HTTP Basic)
 # ============================================================
 class BasicAuthMiddleware(BaseHTTPMiddleware):
+    # Render (и любой другой оркестратор) стучится на health-check БЕЗ
+    # заголовка Authorization — если этот путь тоже требует Basic Auth,
+    # проверка всегда получает 401, Render считает деплой нездоровым
+    # (именно это видно в логе: "GET /health HTTP/1.1 401 Unauthorized"
+    # по кругу). Поэтому health-check — единственное публичное исключение.
+    PUBLIC_PATHS = {"/health"}
+
     async def dispatch(self, request: Request, call_next):
+        if request.url.path in self.PUBLIC_PATHS:
+            return await call_next(request)
         auth = request.headers.get("Authorization")
         if auth:
             try:
@@ -176,6 +208,13 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(BasicAuthMiddleware)
+
+
+@app.get("/health")
+async def health():
+    """Публичный health-check для Render (без Basic Auth, без обращений к
+    Supabase/Infisical) — просто подтверждает, что процесс жив и отвечает."""
+    return {"status": "ok"}
 
 
 # ============================================================
@@ -206,10 +245,22 @@ async def index():
         return HTMLResponse(f.read())
 
 
+@app.get("/filters", response_class=HTMLResponse)
+async def filters_page():
+    with open("filters.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(f.read())
+
+
+@app.get("/broken", response_class=HTMLResponse)
+async def broken_page():
+    with open("broken.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(f.read())
+
+
 @app.get("/api/status")
 async def api_status():
     """Небольшой диагностический эндпоинт — видно, откуда взялись секреты
-    и реально ли приложение читает/пишет в Supabase."""
+    и реально ли приложение читает/пишет в Supabase, и доступен ли Tesseract."""
     status = {
         "secrets_source": SECRETS_SOURCE,
         "secrets_debug": SECRETS_DEBUG,
@@ -223,6 +274,10 @@ async def api_status():
         "supabase_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_KEY),
         "supabase_connected": False,
         "row_count": None,
+        "ocr_source": "remote",
+        "ocr_remote_url": OCR_REMOTE_URL,
+        "ocr_available": bool(OCR_REMOTE_URL),
+        "ocr_error": None if OCR_REMOTE_URL else "OCR_REMOTE_URL не задан",
     }
     if supabase is not None:
         try:
@@ -231,6 +286,7 @@ async def api_status():
             status["row_count"] = result.count
         except Exception as e:
             status["error"] = str(e)
+
     return status
 
 
@@ -261,11 +317,8 @@ class LRUCache:
 
 
 image_bytes_cache = LRUCache(maxsize=250)   # сырые байты фото с Backblaze
-filters_cache = LRUCache(maxsize=60)        # готовые варианты обработки (тяжелее по памяти)
 
 IMAGE_CACHE_CONTROL = "public, max-age=604800, immutable"  # неделя — фото по URL не меняются
-FILTERS_CACHE_CONTROL = "public, max-age=300"  # 5 минут — набор фильтров ещё дорабатывается,
-                                                # без immutable, чтобы браузер сам перезапрашивал
 
 
 # ============================================================
@@ -282,6 +335,14 @@ def fetch_image_bytes(url: str) -> bytes:
     return content
 
 
+def fetch_image_bgr(url: str):
+    """Скачивает (с кэшем) и декодирует в OpenCV BGR-массив. Возвращает
+    None, если фото не скачалось/не декодировалось."""
+    content = fetch_image_bytes(url)
+    arr = np.frombuffer(content, dtype=np.uint8)
+    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+
 @app.get("/proxy-image")
 async def proxy_image(url: str):
     try:
@@ -295,209 +356,382 @@ async def proxy_image(url: str):
         return JSONResponse(status_code=404, content={"error": f"Фото не найдено: {e}"})
 
 
-# ============================================================
-#              ФИЛЬТРЫ ДЛЯ ПРОВЕРКИ ЧИТАЕМОСТИ
-#
-#   Набор пересобран после разбора конкретных "бледных" чеков
-#   (низкий контраст, почти белый фон, ~150x80px, тяжёлый JPEG).
-#   Раньше половина фильтров растягивала разницу каналов
-#   ФИКСИРОВАННЫМИ alpha/beta — на таких бледных фото это либо
-#   клипует всё в чистый чёрный/белый, либо не даёт контраста.
-#   Сейчас база — адаптивная percentile-растяжка (_pct_stretch),
-#   она сама подстраивается под реальный разброс яркости каждого
-#   конкретного фото, а не бьёт по одному и тому же коэффициенту
-#   для всех. Дублирующие "почти одинаковые" каналы (R-B и B-R и
-#   т.п. отличаются только инверсией) убраны — их было 6-7 штук,
-#   несущих одну и ту же информацию.
-# ============================================================
-def _to_gray(bgr: np.ndarray) -> np.ndarray:
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-
-
-def _auto_invert(gray: np.ndarray) -> np.ndarray:
-    return 255 - gray if float(np.mean(gray)) > 140 else gray
-
-
-def _pct_stretch(arr: np.ndarray, lo: float = 1, hi: float = 99) -> np.ndarray:
-    """Растяжка гистограммы по процентилям — подстраивается под контраст
-    конкретного фото вместо фиксированных alpha/beta."""
-    lo_v, hi_v = np.percentile(arr, [lo, hi])
-    out = (arr.astype(np.float32) - lo_v) / (hi_v - lo_v + 1e-6) * 255
-    return np.clip(out, 0, 255).astype(np.uint8)
-
-
-def _deblock8(gray: np.ndarray) -> np.ndarray:
-    """Убирает JPEG-блочность период-8 (сильно сжатые почти-однотонные фото
-    часто показывают решётку ровно 8x8 px — это не текстура бумаги и не шум,
-    а артефакт квантования DCT-блоков). Обычный blur/denoise его не берёт,
-    т.к. это не случайный шум, а жёсткая периодика — box(8,8) усредняет
-    ровно по периоду и гасит её почти полностью."""
-    return cv2.blur(gray.astype(np.float32), (8, 8))
-
-
-def f_original(bgr):
-    return bgr
-
-
-def f_fast_clahe(bgr):
-    base = _auto_invert(_to_gray(bgr))
-    clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8, 8))
-    return clahe.apply(base)
-
-
-def f_adaptive_threshold(bgr):
-    base = _auto_invert(_to_gray(bgr))
-    binary = cv2.adaptiveThreshold(
-        base, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 3
-    )
-    kernel = np.ones((2, 2), np.uint8)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-    return binary
-
-
-def f_br_stretch(bgr):
-    """B-R разница с адаптивной percentile-растяжкой. Основной рабочий
-    вариант для бледных/белесых чеков — самый согласованный сигнал
-    в тестах на низкоконтрастных фото."""
-    b, g, r = cv2.split(bgr.astype(np.float32))
-    return _pct_stretch(b - r)
-
-
-def f_otsu_br(bgr):
-    """Самый чистый бинарный результат в тестах — Otsu поверх
-    percentile-растянутой B-R разницы."""
-    b, g, r = cv2.split(bgr.astype(np.float32))
-    stretched = _pct_stretch(b - r)
-    _, otsu = cv2.threshold(stretched, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return otsu
-
-
-def f_bilateral_otsu_br(bgr):
-    """То же + bilateral перед порогом — гасит мелкий JPEG-блочный шум,
-    сохраняя края букв."""
-    b, g, r = cv2.split(bgr.astype(np.float32))
-    stretched = _pct_stretch(b - r)
-    smooth = cv2.bilateralFilter(stretched, d=5, sigmaColor=30, sigmaSpace=30)
-    _, otsu = cv2.threshold(smooth, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return otsu
-
-
-def f_clahe_br(bgr):
-    """CLAHE поверх уже растянутой B-R — усиливает локальный контраст
-    без пересветов, которые давал CLAHE на сыром канале."""
-    b, g, r = cv2.split(bgr.astype(np.float32))
-    stretched = _pct_stretch(b - r)
-    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
-    return clahe.apply(stretched)
-
-
-def f_lab_b_stretch(bgr):
-    """L*a*b* b-канал (жёлто-синяя ось) — иногда ловит то, что
-    RGB-разности замыливают, особенно на желтоватых/бежевых фото."""
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-    _, _, b_channel = cv2.split(lab)
-    return _pct_stretch(b_channel)
-
-
-def f_upscale_sharpen(bgr):
-    """Апскейл x3 поверх percentile-растянутой B-R + резкость —
-    удобно для финального визуального разглядывания."""
-    b, g, r = cv2.split(bgr.astype(np.float32))
-    stretched = _pct_stretch(b - r)
-    h, w = stretched.shape
-    big = cv2.resize(stretched, (w * 3, h * 3), interpolation=cv2.INTER_CUBIC)
-    blurred = cv2.GaussianBlur(big, (0, 0), sigmaX=2)
-    sharp = cv2.addWeighted(big, 1.8, blurred, -0.8, 0)
-    return sharp
-
-
-def f_deblock_stretch(bgr):
-    """Деблокинг (box 8x8) + растяжка по сером — для фото с явной
-    8-пиксельной решёткой JPEG-компрессии на фоне (не текстура бумаги)."""
-    gray = _to_gray(bgr)
-    deblocked = _deblock8(gray)
-    return _pct_stretch(deblocked)
-
-
-def f_deblock_clahe(bgr):
-    """Деблокинг + CLAHE — локальный контраст без решётки поверх."""
-    gray = _to_gray(bgr)
-    deblocked = _deblock8(gray)
-    stretched = _pct_stretch(deblocked)
-    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
-    return clahe.apply(stretched)
-
-
-def f_deblock_otsu(bgr):
-    """Деблокинг + Otsu — бинарный вариант для тех же зернистых фото."""
-    gray = _to_gray(bgr)
-    deblocked = _deblock8(gray)
-    stretched = _pct_stretch(deblocked)
-    _, otsu = cv2.threshold(stretched, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return otsu
-
-
-FILTERS = [
-    ("original", "Оригинал", f_original),
-    ("fast_clahe", "CLAHE (по серому)", f_fast_clahe),
-    ("adaptive_threshold", "Адаптивная бинаризация", f_adaptive_threshold),
-    ("br_stretch", "B-R растяжка (основной)", f_br_stretch),
-    ("otsu_br", "B-R + Otsu (самый чистый)", f_otsu_br),
-    ("bilateral_otsu_br", "B-R + шумодав + Otsu", f_bilateral_otsu_br),
-    ("clahe_br", "B-R + CLAHE", f_clahe_br),
-    ("lab_b_stretch", "LAB b-канал", f_lab_b_stretch),
-    ("upscale_sharpen", "Апскейл x3 + резкость", f_upscale_sharpen),
-    ("deblock_stretch", "Деблок 8x8 + растяжка", f_deblock_stretch),
-    ("deblock_clahe", "Деблок 8x8 + CLAHE", f_deblock_clahe),
-    ("deblock_otsu", "Деблок 8x8 + Otsu", f_deblock_otsu),
-]
-
-
-def encode_png_base64(arr: np.ndarray) -> str:
+def encode_png_bytes(arr: np.ndarray) -> bytes:
+    """PNG-байты (не base64) — то, что реально уходит в файл/по сети."""
     if arr.ndim == 2:
         img = Image.fromarray(arr, mode="L")
     else:
         img = Image.fromarray(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    return buf.getvalue()
 
 
-@app.get("/proxy-filters")
-async def proxy_filters(url: str):
-    cached = filters_cache.get(url)
-    if cached is not None:
-        return Response(
-            content=cached,
-            media_type="application/json",
-            headers={"Cache-Control": FILTERS_CACHE_CONTROL},
-        )
+def encode_png_base64(arr: np.ndarray) -> str:
+    return "data:image/png;base64," + base64.b64encode(encode_png_bytes(arr)).decode("ascii")
 
+
+# ============================================================
+#                 УДАЛЁННЫЙ OCR (bls.shikinn.com)
+#
+#   Вместо локального pytesseract (ему нужен системный tesseract-ocr,
+#   ставится только через Docker-деплой) — шлём сырые байты фото на
+#   ваш собственный OCR-сервис по HTTP.
+#
+#   ВАЖНО: точный контракт запроса/ответа bls.shikinn.com/ocr мне не
+#   известен — ниже сделан наиболее типичный вариант:
+#     запрос:  POST multipart/form-data, файл в поле OCR_REMOTE_FIELD_NAME
+#     ответ:   JSON, распознанный текст в одном из полей
+#              text / digits / result / price / value
+#   Если сервис ждёт другое (например JSON с base64 вместо файла, или
+#   другое имя поля/ответа) — правьте только эту функцию, остальной
+#   код её не касается.
+# ============================================================
+OCR_REMOTE_URL = os.environ.get("OCR_REMOTE_URL", "https://bls.shikinn.com/ocr")
+OCR_REMOTE_TIMEOUT = float(os.environ.get("OCR_REMOTE_TIMEOUT", 20))
+OCR_REMOTE_FIELD_NAME = os.environ.get("OCR_REMOTE_FIELD_NAME", "file")
+
+
+def extract_via_remote_ocr(image_bytes: bytes):
+    """Отправляет уже готовые байты картинки (PNG/JPEG — не важно) на
+    внешний OCR и вытаскивает из ответа только цифры.
+    Возвращает (digits_str_or_None, error_or_None)."""
+    if not OCR_REMOTE_URL:
+        return None, "OCR_REMOTE_URL не задан"
     try:
-        content = fetch_image_bytes(url)
-        arr = np.frombuffer(content, dtype=np.uint8)
-        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        resp = requests.post(
+            OCR_REMOTE_URL,
+            files={OCR_REMOTE_FIELD_NAME: ("image.jpg", image_bytes, "application/octet-stream")},
+            timeout=OCR_REMOTE_TIMEOUT,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        return None, f"OCR-сервис недоступен ({OCR_REMOTE_URL}): {e}"
+
+    raw_text = None
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            for key in ("text", "digits", "result", "price", "value"):
+                if data.get(key):
+                    raw_text = str(data[key])
+                    break
+            if raw_text is None:
+                raw_text = str(data)
+        else:
+            raw_text = str(data)
+    except ValueError:
+        # ответ не JSON — берём как есть (вдруг это просто "1234" текстом)
+        raw_text = resp.text
+
+    digits = re.sub(r"\D", "", raw_text or "")
+    if not digits:
+        return None, f"цифры не найдены в ответе OCR-сервиса (сырой ответ: {raw_text[:200]!r})"
+    return digits, None
+
+
+# ============================================================
+#     ФИЛЬТРЫ КАК ДАННЫЕ: генератор превью по params + CRUD рецептов
+#
+#   Раньше здесь было 12 захардкоженных python-функций и статичная
+#   сетка из 12 картинок. Теперь — один параметризованный движок
+#   (filters_engine.apply_recipe), а сами варианты обработки живут
+#   в таблице filter_presets и редактируются через страницу /filters
+#   или ползунками прямо в карточке чека — без правки кода.
+# ============================================================
+class ApplyRecipeRequest(BaseModel):
+    url: str
+    params: dict
+
+
+@app.post("/api/apply-recipe")
+async def api_apply_recipe(payload: ApplyRecipeRequest):
+    """Обрабатывает фото ОДНИМ набором параметров и возвращает PNG-превью.
+    Дергается с фронта при каждом движении ползунка (с debounce ~200ms
+    на стороне клиента, чтобы не заваливать сервер на каждый пиксель
+    перетаскивания)."""
+    try:
+        bgr = fetch_image_bgr(payload.url)
         if bgr is None:
             return JSONResponse(status_code=400, content={"error": "Не удалось декодировать изображение"})
+        out = apply_recipe(bgr, payload.params)
+        b64 = encode_png_base64(out)
+        return {"image": b64, "width": bgr.shape[1], "height": bgr.shape[0]}
     except Exception as e:
-        return JSONResponse(status_code=404, content={"error": f"Фото не найдено: {e}"})
+        return JSONResponse(status_code=500, content={"error": f"Ошибка обработки: {e}"})
 
-    results = []
-    for key, label, func in FILTERS:
+
+class RecipeIn(BaseModel):
+    name: str
+    description: Optional[str] = None
+    params: dict
+    fon_type: Optional[str] = None
+    is_default: Optional[bool] = False
+    sort_order: Optional[int] = 0
+
+
+@app.get("/api/recipes")
+async def list_recipes(fon_type: Optional[str] = None):
+    """Список рецептов. Если передан fon_type — сначала рецепты под этот
+    фон (свои + универсальные default), затем остальные — чтобы в модалке
+    сверху показывались наиболее релевантные варианты."""
+    try:
+        require_supabase()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    result = supabase.table("filter_presets").select("*").order("sort_order").execute()
+    rows = result.data
+
+    if fon_type:
+        matching = [r for r in rows if r.get("fon_type") == fon_type]
+        defaults = [r for r in rows if r.get("fon_type") is None and r.get("is_default")]
+        rest = [r for r in rows if r not in matching and r not in defaults]
+        rows = matching + defaults + rest
+
+    return rows
+
+
+@app.post("/api/recipes")
+async def create_recipe(recipe: RecipeIn):
+    try:
+        require_supabase()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    result = supabase.table("filter_presets").insert(recipe.dict()).execute()
+    return result.data[0]
+
+
+@app.put("/api/recipes/{recipe_id}")
+async def update_recipe(recipe_id: int, recipe: RecipeIn):
+    try:
+        require_supabase()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    payload = recipe.dict()
+    payload["updated_at"] = "now()"
+    supabase.table("filter_presets").update(payload).eq("id", recipe_id).execute()
+    return {"message": "ok"}
+
+
+@app.delete("/api/recipes/{recipe_id}")
+async def delete_recipe(recipe_id: int):
+    try:
+        require_supabase()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    supabase.table("filter_presets").delete().eq("id", recipe_id).execute()
+    return {"message": "ok"}
+
+
+@app.post("/api/recipes/{recipe_id}/mark-used")
+async def mark_recipe_used(recipe_id: int, payload: dict):
+    """Привязывает рецепт к конкретному чеку (best_recipe_id) — для
+    статистики 'что чаще всего спасает такой-то фон'."""
+    try:
+        require_supabase()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    row_id = payload.get("id")
+    if row_id is None:
+        return JSONResponse(status_code=400, content={"error": "Нужен id чека"})
+    supabase.table("price_checks").update({
+        "best_recipe_id": recipe_id,
+        "reviewed": True,
+    }).eq("id", row_id).execute()
+    return {"message": "ok"}
+
+
+# ============================================================
+#              СТРАНИЦА "ПРОБЛЕМНЫЕ" (/broken)
+# ============================================================
+@app.get("/api/broken")
+async def api_broken():
+    """Только реально отмеченные операторами забагованные чеки,
+    сгруппированные по категории фона — для отдельной страницы,
+    а не общей ленты из 5000+ карточек."""
+    try:
+        require_supabase()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    all_rows = []
+    start = 0
+    page_size = 1000
+    while True:
+        result = (supabase.table("price_checks")
+                  .select("*")
+                  .eq("is_broken", True)
+                  .order("fon_type")
+                  .range(start, start + page_size - 1)
+                  .execute())
+        chunk = result.data
+        all_rows.extend(chunk)
+        if len(chunk) < page_size:
+            break
+        start += page_size
+
+    groups = {}
+    for row in all_rows:
+        key = row.get("fon_type") or "(без категории)"
+        groups.setdefault(key, []).append(row)
+
+    # сортируем группы по размеру убыв. — сначала самые массовые проблемные фоны
+    ordered = sorted(groups.items(), key=lambda kv: -len(kv[1]))
+    return {
+        "total": len(all_rows),
+        "groups": [{"fon_type": k, "count": len(v), "rows": v} for k, v in ordered],
+    }
+
+
+# ============================================================
+#                            OCR
+#
+#   Автоматическая проверка читаемости — вместо того, чтобы искать
+#   новые плохие фото глазами, можно прогнать выборку через Tesseract
+#   и получить список того, где цифры не читаются или не совпадают
+#   с текущим label. Работает как поверх сырого фото (тем же
+#   алгоритмом, что был в присланном ocr_engine.py), так и поверх
+#   результата любого рецепта из filters_engine — чтобы проверить,
+#   действительно ли конкретная обработка помогает распознаванию,
+#   а не просто "на глаз читается".
+#
+#   ВАЖНО: pytesseract — это только Python-обёртка, ей нужен системный
+#   бинарник tesseract-ocr. На Render 'Native' environment apt-get
+#   недоступен (см. /api/status -> ocr_available) — для этой функции
+#   нужен Docker-деплой, см. приложенный Dockerfile.
+# ============================================================
+class OcrCheckRequest(BaseModel):
+    url: str
+    params: Optional[dict] = None  # если не передано — используется свой встроенный clean_image
+
+
+@app.post("/api/ocr-check")
+async def api_ocr_check(payload: OcrCheckRequest):
+    """Прогоняет OCR либо по сырому фото (свой алгоритм очистки), либо
+    по результату конкретного рецепта — используется кнопкой
+    '🤖 Проверить OCR' прямо в лаборатории фильтров."""
+    try:
+        bgr = fetch_image_bgr(payload.url)
+        if bgr is None:
+            return JSONResponse(status_code=400, content={"error": "Не удалось декодировать изображение"})
+
+        if payload.params:
+            processed = apply_recipe(bgr, payload.params)
+            digits, err = extract_via_remote_ocr(encode_png_bytes(processed))
+        else:
+            digits, err = extract_via_remote_ocr(fetch_image_bytes(payload.url))
+
+        return {"digits": digits, "error": err}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Ошибка OCR: {e}"})
+
+
+class OcrScanRequest(BaseModel):
+    limit: Optional[int] = 20
+    fon_type: Optional[str] = None
+    only_unreviewed: Optional[bool] = True
+    recipe_id: Optional[int] = None  # если не задан — берём собственную очистку ocr_engine
+
+
+# На фри тарифе Render 0.1 vCPU + 512 МБ RAM: один запрос "на 1000 фото
+# разом" либо не влезет в память, либо просто не успеет ответить до того,
+# как прокси/браузер решат, что сервис "упал" (таймаут). Поэтому:
+#   - дефолт и потолок лимита сильно ниже, чем было (100, а не 1000);
+#   - есть мягкий бюджет по времени — если скан идёт дольше OCR_SCAN_TIME_BUDGET_S,
+#     останавливаемся и отдаём то, что успели, с пометкой stopped_early=True,
+#     вместо того чтобы зависнуть до убийства процесса/запроса.
+OCR_SCAN_MAX_LIMIT = int(os.environ.get("OCR_SCAN_MAX_LIMIT", 100))
+OCR_SCAN_TIME_BUDGET_S = float(os.environ.get("OCR_SCAN_TIME_BUDGET_S", 25))
+
+
+@app.post("/api/ocr-scan")
+async def api_ocr_scan(payload: OcrScanRequest):
+    """Пакетная проверка выборки чеков через OCR — это и есть 'тестовая
+    выборка, которая сама покажет новые плохие фото', без ручного
+    пролистывания. Результат сохраняется в price_checks (ocr_text,
+    ocr_mismatch, ocr_checked_at), поэтому потом их можно отфильтровать
+    прямо на главной странице ('🤖 OCR не совпадает' / '🤖 OCR не прочитал')."""
+    try:
+        require_supabase()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    recipe_params = None
+    if payload.recipe_id is not None:
+        rr = supabase.table("filter_presets").select("params").eq("id", payload.recipe_id).limit(1).execute()
+        if not rr.data:
+            return JSONResponse(status_code=400, content={"error": f"Рецепт id={payload.recipe_id} не найден"})
+        recipe_params = rr.data[0]["params"]
+
+    query = supabase.table("price_checks").select("id, url, label, filename")
+    if payload.fon_type:
+        query = query.eq("fon_type", payload.fon_type)
+    if payload.only_unreviewed:
+        query = query.eq("reviewed", False)
+    limit = max(1, min(int(payload.limit or 20), OCR_SCAN_MAX_LIMIT))
+    result = query.order("id").limit(limit).execute()
+    rows = result.data
+
+    checked = 0
+    mismatches = []
+    unread = []
+    started_at = time.monotonic()
+    stopped_early = False
+    for i, row in enumerate(rows):
+        if time.monotonic() - started_at > OCR_SCAN_TIME_BUDGET_S:
+            stopped_early = True
+            break
+
+        url = row.get("url")
+        if not url:
+            continue
+        bgr = None
+        processed = None
         try:
-            out = func(bgr)
-            results.append({"key": key, "label": label, "image": encode_png_base64(out)})
+            bgr = fetch_image_bgr(url)
+            if bgr is None:
+                digits, err = None, "не удалось декодировать фото"
+            elif recipe_params is not None:
+                processed = apply_recipe(bgr, recipe_params)
+                digits, err = extract_via_remote_ocr(encode_png_bytes(processed))
+            else:
+                digits, err = extract_via_remote_ocr(fetch_image_bytes(url))
         except Exception as e:
-            results.append({"key": key, "label": f"{label} — ошибка: {e}", "image": None})
+            digits, err = None, str(e)
+        finally:
+            # Явно освобождаем декодированные картинки — на 512 МБ RAM
+            # не хотим ждать, пока сборщик мусора сам доберётся до них.
+            del bgr, processed
+            if i % 10 == 0:
+                gc.collect()
 
-    payload = {"width": bgr.shape[1], "height": bgr.shape[0], "filters": results}
+        label = str(row.get("label") or "")
+        is_mismatch = (digits is None) or (digits.lstrip("0") != label.lstrip("0"))
 
-    import json
-    body = json.dumps(payload).encode("utf-8")
-    filters_cache.set(url, body)
+        supabase.table("price_checks").update({
+            "ocr_text": digits,
+            "ocr_mismatch": is_mismatch,
+            "ocr_checked_at": "now()",
+        }).eq("id", row["id"]).execute()
 
-    return Response(content=body, media_type="application/json", headers={"Cache-Control": FILTERS_CACHE_CONTROL})
+        checked += 1
+        entry = {"id": row["id"], "filename": row.get("filename"), "label": label, "ocr_text": digits, "error": err}
+        if digits is None:
+            unread.append(entry)
+        elif is_mismatch:
+            mismatches.append(entry)
+
+    return {
+        "checked": checked,
+        "requested": len(rows),
+        "limit": limit,  # сколько реально запросили из БД в этом вызове (после clamp на OCR_SCAN_MAX_LIMIT)
+        "stopped_early": stopped_early,  # True = уперлись в тайм-бюджет, а не кончились строки — жмите ещё раз
+        "mismatches_count": len(mismatches),
+        "unread_count": len(unread),
+        "mismatches": mismatches[:50],
+        "unread": unread[:50],
+    }
 
 
 # ============================================================
@@ -580,7 +814,7 @@ async def get_data():
 
 @app.post("/api/update")
 async def update_row(payload: dict):
-    """Точечное обновление одной строки: label / comment / is_broken."""
+    """Точечное обновление одной строки: label / comment / is_broken / и т.д."""
     try:
         require_supabase()
     except RuntimeError as e:
@@ -591,7 +825,8 @@ async def update_row(payload: dict):
         return JSONResponse(status_code=400, content={"error": "Нужен id"})
 
     update_fields = {}
-    for key in ("label", "comment", "is_broken", "reviewed", "best_filter", "is_placeholder"):
+    for key in ("label", "comment", "is_broken", "reviewed", "best_filter", "is_placeholder",
+                "fon_type", "best_recipe_id"):
         if key in payload:
             update_fields[key] = payload[key]
 
