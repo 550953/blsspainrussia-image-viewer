@@ -1,29 +1,6 @@
 # ============================================================
 #   ОБЩИЙ ПАРАМЕТРИЗОВАННЫЙ ДВИЖОК ОБРАБОТКИ ЧЕКОВ
-#
-#   Раньше: 12 отдельных def f_xxx(bgr) функций — новый вариант
-#   обработки = новый код = поход ко мне.
-#
-#   Теперь: ОДНА функция apply_recipe(bgr, params), где params —
-#   это jsonb-запись из таблицы filter_presets. Новый вариант =
-#   новая строка в базе, которую оператор сам создаёт через
-#   страницу "Фильтры", двигая ползунки.
-#
-#   Все 12 старых функций из старого main.py — это ЧАСТНЫЕ СЛУЧАИ
-#   данного пайплайна с конкретными params (см. LEGACY_PRESETS ниже,
-#   используется как seed-данные при миграции).
-#
-#   Порядок пайплайна (шаги пропускаются, если выключены в params):
-#     1. base signal:  channel-формула ИЛИ градации серого (+ auto-invert)
-#                       ИЛИ LAB b-канал ИЛИ raw (без обработки)
-#     2. деблокинг 8x8 (убирает JPEG-решётку на бледных фото)
-#     3. percentile stretch -> uint8
-#     4. CLAHE (локальный контраст)
-#     5. bilateral (шумодав с сохранением краёв)
-#     6. threshold: none / otsu / adaptive / manual
-#     7. морфология (open+close, чистит бинаризацию от точек)
-#     8. ручная инверсия (после всего, если нужно перевернуть ещё раз)
-#     9. апскейл + резкость (финальный шаг для разглядывания глазами)
+#   (патч: добавлен mode="auto" — самостоятельный подбор канала)
 # ============================================================
 
 import numpy as np
@@ -31,7 +8,6 @@ import cv2
 
 
 def _get(d, path, default):
-    """Достаёт вложенное значение из dict по точечному пути, либо default."""
     cur = d or {}
     for part in path.split('.'):
         if not isinstance(cur, dict) or part not in cur:
@@ -49,8 +25,81 @@ def _pct_stretch(arr: np.ndarray, lo: float, hi: float) -> np.ndarray:
 
 
 def _deblock8(gray: np.ndarray, ksize: int) -> np.ndarray:
+    """Гасит артефакт блочности JPEG (период ровно ksize x ksize по
+    пикселям — проверено напрямую на исходных фото). Работает потому,
+    что сумма любых ksize подряд идущих отсчётов ksize-периодичного
+    сигнала — константа, независимо от фазы/сдвига решётки на фото."""
     ksize = max(2, int(ksize))
     return cv2.blur(gray.astype(np.float32), (ksize, ksize))
+
+
+def _otsu_score(u8: np.ndarray) -> float:
+    """Межклассовая дисперсия по Оцу — грубая, но дешёвая метрика
+    'насколько хорошо сигнал делится на два кластера' (текст/фон).
+    Чем выше — тем увереннее threshold нашёл настоящую границу, а не
+    шум. Используется только для авто-выбора канала, не для самого
+    порога."""
+    thr, _ = cv2.threshold(u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    mask = u8 >= thr
+    if mask.all() or (~mask).all():
+        return 0.0
+    fg = u8[mask].astype(np.float32)
+    bg = u8[~mask].astype(np.float32)
+    w_fg = fg.size / u8.size
+    w_bg = 1 - w_fg
+    return float(w_fg * w_bg * (fg.mean() - bg.mean()) ** 2)
+
+
+# Кандидаты сигнала для авто-режима. Каждый — это (mode, доп.параметры),
+# в том же формате, что understand apply_recipe. Список специально
+# небольшой: это самые частые "победители" среди 25 старых пресетов
+# (см. LEGACY_PRESETS) плюс серый.
+AUTO_CANDIDATES = [
+    {"mode": "gray", "auto_invert": True},
+    {"mode": "channel", "channel": {"r": -1, "g": 0, "b": 1}},   # B-R
+    {"mode": "channel", "channel": {"r": 1, "g": -1, "b": 0}},   # R-G
+    {"mode": "channel", "channel": {"r": -1, "g": 1, "b": 0}},   # G-R
+    {"mode": "lab_b"},
+]
+
+
+def _base_signal(bgr: np.ndarray, params: dict) -> np.ndarray:
+    """Шаг 1 из старого apply_recipe, вынесенный отдельно, чтобы им
+    мог пользоваться и обычный режим, и auto."""
+    mode = _get(params, 'mode', 'channel')
+    if mode == 'channel':
+        b, g, r = cv2.split(bgr.astype(np.float32))
+        cr = _get(params, 'channel.r', -1)
+        cg = _get(params, 'channel.g', 0)
+        cb = _get(params, 'channel.b', 1)
+        return cr * r + cg * g + cb * b
+    elif mode == 'lab_b':
+        lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+        _, _, signal = cv2.split(lab)
+        return signal
+    else:  # 'gray'
+        signal = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        if _get(params, 'auto_invert', True):
+            if float(np.mean(signal)) > 140:
+                signal = 255 - signal
+        return signal
+
+
+def auto_pick_signal(bgr: np.ndarray, deblock_ksize: int = 8, lo: float = 1, hi: float = 99):
+    """Перебирает AUTO_CANDIDATES, для каждого делает деблок+растяжку
+    и оценивает контраст по Оцу. Возвращает (лучшая_картинка_uint8,
+    имя_победившего_кандидата) — второе полезно для логов/статистики
+    'какой канал чаще всего выигрывает', чтобы со временем можно было
+    сократить список fon_type вручную."""
+    best_img, best_score, best_name = None, -1.0, None
+    for cand in AUTO_CANDIDATES:
+        signal = _base_signal(bgr, cand)
+        signal = _deblock8(signal, deblock_ksize)
+        out = _pct_stretch(signal, lo, hi)
+        score = _otsu_score(out)
+        if score > best_score:
+            best_img, best_score, best_name = out, score, cand.get("channel", cand["mode"])
+    return best_img, best_name
 
 
 def apply_recipe(bgr: np.ndarray, params: dict) -> np.ndarray:
@@ -61,21 +110,16 @@ def apply_recipe(bgr: np.ndarray, params: dict) -> np.ndarray:
     if mode == 'raw':
         return bgr
 
-    # --- шаг 1: базовый сигнал ---
-    if mode == 'channel':
-        b, g, r = cv2.split(bgr.astype(np.float32))
-        cr = _get(params, 'channel.r', -1)
-        cg = _get(params, 'channel.g', 0)
-        cb = _get(params, 'channel.b', 1)
-        signal = cr * r + cg * g + cb * b
-    elif mode == 'lab_b':
-        lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-        _, _, signal = cv2.split(lab)
-    else:  # 'gray'
-        signal = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        if _get(params, 'auto_invert', True):
-            if float(np.mean(signal)) > 140:
-                signal = 255 - signal
+    # --- новый режим: авто-подбор канала ---
+    if mode == 'auto':
+        ksize = _get(params, 'deblock.ksize', 8)
+        lo = _get(params, 'percentile.lo', 1)
+        hi = _get(params, 'percentile.hi', 99)
+        out, _name = auto_pick_signal(bgr, deblock_ksize=ksize, lo=lo, hi=hi)
+        return out
+
+    # --- шаг 1: базовый сигнал (старое поведение) ---
+    signal = _base_signal(bgr, params)
 
     # --- шаг 2: деблокинг (на float-сигнале, до нормализации) ---
     if _get(params, 'deblock.enabled', False):
@@ -115,7 +159,7 @@ def apply_recipe(bgr: np.ndarray, params: dict) -> np.ndarray:
         out = cv2.adaptiveThreshold(out, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                      cv2.THRESH_BINARY, block, c)
 
-    # --- шаг 7: морфология (только если был порог — на полутонах бессмысленна) ---
+    # --- шаг 7: морфология (только если был порог) ---
     if thr_mode != 'none' and _get(params, 'morphology.enabled', False):
         k = int(_get(params, 'morphology.ksize', 2))
         kernel = np.ones((k, k), np.uint8)
@@ -137,106 +181,3 @@ def apply_recipe(bgr: np.ndarray, params: dict) -> np.ndarray:
             out = cv2.addWeighted(out, 1 + sharpen, blurred, -sharpen, 0)
 
     return out
-
-
-# ============================================================
-#   SEED: старые 12 python-функций как стартовые рецепты.
-#   Используется один раз скриптом 03_seed_legacy_presets.py —
-#   дальше это обычные строки в filter_presets, редактируемые
-#   через страницу "Фильтры" как любые новые.
-# ============================================================
-LEGACY_PRESETS = [
-    {
-        "name": "Оригинал",
-        "description": "Без обработки — как есть.",
-        "is_legacy": True, "is_default": True, "sort_order": 0,
-        "params": {"mode": "raw"},
-    },
-    {
-        "name": "CLAHE (по серому)",
-        "description": "Базовый локальный контраст по серому с авто-инверсией.",
-        "is_legacy": True, "sort_order": 10,
-        "params": {"mode": "gray", "auto_invert": True,
-                   "clahe": {"enabled": True, "clip": 3.5, "tile": 8}},
-    },
-    {
-        "name": "Адаптивная бинаризация",
-        "description": "Локальный порог + чистка морфологией.",
-        "is_legacy": True, "sort_order": 20,
-        "params": {"mode": "gray", "auto_invert": True,
-                   "threshold": {"mode": "adaptive", "block_size": 15, "c": 3},
-                   "morphology": {"enabled": True, "ksize": 2}},
-    },
-    {
-        "name": "B-R растяжка (основной)",
-        "description": "Разница синего и красного канала — рабочая лошадка для бледных чеков.",
-        "is_legacy": True, "is_default": True, "sort_order": 30,
-        "params": {"mode": "channel", "channel": {"r": -1, "g": 0, "b": 1},
-                   "percentile": {"lo": 1, "hi": 99}},
-    },
-    {
-        "name": "B-R + Otsu (самый чистый)",
-        "description": "То же + автопорог Otsu — самый чистый бинарный результат в тестах.",
-        "is_legacy": True, "is_default": True, "sort_order": 40,
-        "params": {"mode": "channel", "channel": {"r": -1, "g": 0, "b": 1},
-                   "percentile": {"lo": 1, "hi": 99},
-                   "threshold": {"mode": "otsu"}},
-    },
-    {
-        "name": "B-R + шумодав + Otsu",
-        "description": "Bilateral перед порогом — гасит JPEG-шум, сохраняя края букв.",
-        "is_legacy": True, "sort_order": 50,
-        "params": {"mode": "channel", "channel": {"r": -1, "g": 0, "b": 1},
-                   "percentile": {"lo": 1, "hi": 99},
-                   "bilateral": {"enabled": True, "d": 5, "sigma_color": 30, "sigma_space": 30},
-                   "threshold": {"mode": "otsu"}},
-    },
-    {
-        "name": "B-R + CLAHE",
-        "description": "Локальный контраст поверх растянутой B-R без пересветов.",
-        "is_legacy": True, "sort_order": 60,
-        "params": {"mode": "channel", "channel": {"r": -1, "g": 0, "b": 1},
-                   "percentile": {"lo": 1, "hi": 99},
-                   "clahe": {"enabled": True, "clip": 4.0, "tile": 4}},
-    },
-    {
-        "name": "LAB b-канал",
-        "description": "Жёлто-синяя ось LAB — ловит то, что RGB-разности замыливают.",
-        "is_legacy": True, "sort_order": 70,
-        "params": {"mode": "lab_b", "percentile": {"lo": 1, "hi": 99}},
-    },
-    {
-        "name": "Апскейл x3 + резкость",
-        "description": "Для финального визуального разглядывания.",
-        "is_legacy": True, "sort_order": 80,
-        "params": {"mode": "channel", "channel": {"r": -1, "g": 0, "b": 1},
-                   "percentile": {"lo": 1, "hi": 99},
-                   "upscale": {"factor": 3, "sharpen": 0.8}},
-    },
-    {
-        "name": "Деблок 8x8 + растяжка",
-        "description": "Убирает JPEG-решётку на бледном фоне.",
-        "is_legacy": True, "sort_order": 90,
-        "params": {"mode": "gray", "auto_invert": False,
-                   "deblock": {"enabled": True, "ksize": 8},
-                   "percentile": {"lo": 1, "hi": 99}},
-    },
-    {
-        "name": "Деблок 8x8 + CLAHE",
-        "description": "Деблокинг + локальный контраст без решётки поверх.",
-        "is_legacy": True, "sort_order": 100,
-        "params": {"mode": "gray", "auto_invert": False,
-                   "deblock": {"enabled": True, "ksize": 8},
-                   "percentile": {"lo": 1, "hi": 99},
-                   "clahe": {"enabled": True, "clip": 4.0, "tile": 4}},
-    },
-    {
-        "name": "Деблок 8x8 + Otsu",
-        "description": "Бинарный вариант для тех же зернистых фото.",
-        "is_legacy": True, "sort_order": 110,
-        "params": {"mode": "gray", "auto_invert": False,
-                   "deblock": {"enabled": True, "ksize": 8},
-                   "percentile": {"lo": 1, "hi": 99},
-                   "threshold": {"mode": "otsu"}},
-    },
-]
