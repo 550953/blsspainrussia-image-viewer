@@ -26,6 +26,9 @@
     .toolbar .sel-count { color:#f3c763; font-weight:700; }
     .toolbar .spacer { flex:1; }
     .progress-line { font-size:12px; color:#888; min-height:16px; }
+    .progress-bar-wrap { display:none; height:8px; background:#222; border-radius:4px; overflow:hidden; margin:4px 0 8px; }
+    .progress-bar-wrap.active { display:block; }
+    .progress-bar-fill { height:100%; width:0%; background:linear-gradient(90deg,#4c6ef5,#7ee787); transition:width .2s ease; }
 
     .group { margin-bottom:14px; border:1px solid #2a2d36; border-radius:8px; overflow:hidden; }
     .group-header {
@@ -149,7 +152,9 @@
         <span>Выбрано: <span class="sel-count" id="selCount">0</span></span>
         <div class="spacer"></div>
         <button class="primary" onclick="bulkRecognize()">🤖 Распознать в ОЦР (для выбранных)</button>
+        <button onclick="bulkRecognizeOneByOne()" title="Медленнее, но каждая картинка отдельным запросом — без риска, что Gemini спутает соседние ячейки">🔍 Прочесть поштучно</button>
     </div>
+    <div class="progress-bar-wrap" id="progressBarWrap"><div class="progress-bar-fill" id="progressBarFill"></div></div>
     <div class="progress-line" id="progressLine"></div>
     <div id="groups"></div>
 </div>
@@ -520,74 +525,130 @@ async function checkCell(rowId, recipeId) {
     }
 }
 
-// ====================== "РАСПОЗНАТЬ В ОЦР": ОДИН батч-запрос на всю строку ======================
-// Раньше здесь был цикл по всем фильтрам с ОТДЕЛЬНЫМ HTTP-запросом на
-// каждый (checkCell в for) — это и есть причина "дошло до Оригинала и
-// зависло": донор заточен под пачки до 500 картинок за раз, а мы били
-// его по одной, платя полный цикл ключ->прокси->Gemini ради 1 ячейки.
-// Теперь все фильтры строки уходят ОДНИМ запросом в /api/ocr-check-batch.
+// ====================== "РАСПОЗНАТЬ В ОЦР" ДЛЯ ОДНОЙ СТРОКИ (кнопка "Все фильтры этой строки") ======================
+// ВАЖНО: для ОДНОЙ строки все фильтры — это варианты ОДНОЙ и той же
+// картинки. Пробовали слать их одним батч-запросом (contact sheet из
+// N вариантов одного чека) — Gemini путается: видит, что это явно один
+// и тот же документ, находит одну читаемую версию и переносит её ответ
+// на соседние нечитаемые ячейки вместо честного null. Поэтому для ОДНОЙ
+// строки — по-прежнему по одной картинке за запрос (checkCell), это
+// работает верно и просто быстро (~30 лёгких запросов на 1 строку —
+// приемлемо для ручного разового клика). С ранним выходом при совпадении.
 async function recognizeRow(rowId) {
     if (rowScanState[rowId]?.scanning) return;
     rowScanState[rowId] = { scanning: true };
     const statusEl = document.getElementById(`row-status-${rowId}`);
-    const row = rowsById[rowId];
-    if (!row) { rowScanState[rowId] = { scanning: false }; return false; }
-    // сначала убеждаемся, что превью подгружены (чтобы миниатюры не остались пустыми)
     if (!loadedRows.has(rowId)) { await loadRowThumbnails(rowId); }
-
-    if (statusEl) statusEl.textContent = `🤖 распознаю ${recipes.length} фильтров одним запросом…`;
-
     let found = false;
-    try {
-        const resp = await fetch('/api/ocr-check-batch', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: row.url, recipes: recipes.map(r => ({ id: r.id, params: r.params })) }),
-        });
-        const data = await resp.json();
-        const label = String(row.label || '');
-        const results = data.results || [];
-
-        let firstMatchRecipeId = null;
-        for (const item of results) {
-            const ocrEl = document.getElementById(`ocr-${rowId}-${item.id}`);
-            const cellEl = document.getElementById(`cell-${rowId}-${item.id}`);
-            const digits = item.digits;
-            const matches = !!(digits && label && digits.replace(/^0+/, '') === label.replace(/^0+/, ''));
-            if (ocrEl) {
-                ocrEl.textContent = digits ? digits : '—';
-                ocrEl.className = 'cell-ocr ' + (digits ? (matches ? 'match' : 'mismatch') : 'mismatch');
-            }
-            cellEl?.classList.toggle('cell-match', matches);
-            if (matches && firstMatchRecipeId === null) firstMatchRecipeId = item.id;
-        }
-        if (firstMatchRecipeId !== null) {
-            found = true;
-            await markUsed(rowId, firstMatchRecipeId);
-        }
-    } catch (e) {
-        if (statusEl) statusEl.textContent = '❌ ошибка батч-запроса: ' + e;
-        rowScanState[rowId] = { scanning: false };
-        return false;
+    for (let i = 0; i < recipes.length; i++) {
+        if (!rowScanState[rowId]?.scanning) break; // отменено
+        const r = recipes[i];
+        if (statusEl) statusEl.textContent = `🤖 сканирую ${i + 1}/${recipes.length}: ${r.name}…`;
+        const matched = await checkCell(rowId, r.id);
+        if (matched) { found = true; break; }
     }
-
     if (statusEl) statusEl.textContent = found ? '✅ найден рабочий фильтр' : '⚠️ ни один фильтр не совпал — нужна ручная настройка';
     rowScanState[rowId] = { scanning: false };
     return found;
 }
 
+// ====================== МАССОВОЕ РАСПОЗНАВАНИЕ (кнопка "Распознать в ОЦР для выбранных") ======================
+// Здесь картина обратная: строк много, у каждой — СВОЯ (реально разная)
+// цифра. Поэтому пачки собираем по-другому: ВНЕШНИЙ цикл — по фильтрам,
+// ВНУТРЕННИЙ — один батч-запрос "этот фильтр × все ещё не распознанные
+// строки" (картинки в пачке реально разные — ровно тот сценарий, что
+// у вас нормально работал на 5352 разных капчах). Строка, для которой
+// нашлось совпадение, выбывает из следующих раундов.
 async function bulkRecognize() {
     if (!selected.size) { showToast('Сначала выделите строки галочкой слева', false); return; }
     const ids = Array.from(selected);
     const progressEl = document.getElementById('progressLine');
+    const barWrap = document.getElementById('progressBarWrap');
+    const barFill = document.getElementById('progressBarFill');
+    barWrap.classList.add('active');
+    barFill.style.width = '0%';
+
+    // подгружаем превью параллельно (не блокируя друг друга) там, где их ещё нет
+    await Promise.all(ids.filter(id => !loadedRows.has(id)).map(id => loadRowThumbnails(id)));
+
+    const totalRows = ids.length;
+    let pending = new Set(ids);
+    let matched = new Set();
+
+    for (let ri = 0; ri < recipes.length && pending.size; ri++) {
+        const recipe = recipes[ri];
+        const pendingArr = Array.from(pending);
+        progressEl.textContent = `🤖 фильтр ${ri + 1}/${recipes.length} (${recipe.name}) — проверяю ${pendingArr.length} чек(ов)…`;
+        try {
+            const resp = await fetch('/api/ocr-check-filter-batch', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    params: recipe.params,
+                    items: pendingArr.map(id => ({ id, url: rowsById[id].url })),
+                }),
+            });
+            const data = await resp.json();
+            for (const item of (data.results || [])) {
+                const rowId = item.id;
+                const row = rowsById[rowId];
+                const ocrEl = document.getElementById(`ocr-${rowId}-${recipe.id}`);
+                const cellEl = document.getElementById(`cell-${rowId}-${recipe.id}`);
+                const label = String(row?.label || '');
+                const digits = item.digits;
+                const isMatch = !!(digits && label && digits.replace(/^0+/, '') === label.replace(/^0+/, ''));
+                if (ocrEl) {
+                    ocrEl.textContent = digits ? digits : '—';
+                    ocrEl.className = 'cell-ocr ' + (digits ? (isMatch ? 'match' : 'mismatch') : 'mismatch');
+                }
+                cellEl?.classList.toggle('cell-match', isMatch);
+                if (isMatch) {
+                    pending.delete(rowId);
+                    matched.add(rowId);
+                    await markUsed(rowId, recipe.id);
+                    const statusEl = document.getElementById(`row-status-${rowId}`);
+                    if (statusEl) statusEl.textContent = '✅ найден рабочий фильтр';
+                }
+            }
+        } catch (e) {
+            progressEl.textContent = `❌ ошибка на фильтре "${recipe.name}": ${e}`;
+        }
+        barFill.style.width = `${Math.round((totalRows - pending.size) / totalRows * 100)}%`;
+    }
+
+    for (const rowId of pending) {
+        const statusEl = document.getElementById(`row-status-${rowId}`);
+        if (statusEl) statusEl.textContent = '⚠️ ни один фильтр не совпал — нужна ручная настройка';
+    }
+
+    progressEl.textContent = `Готово: обработано ${totalRows}, найден рабочий фильтр для ${matched.size}, не найден для ${pending.size}.`;
+    setTimeout(() => { barWrap.classList.remove('active'); barFill.style.width = '0%'; }, 1500);
+    showToast(`🤖 Готово: ${matched.size}/${totalRows} чеков распознано`);
+}
+
+// ====================== "ПРОЧЕСТЬ ПОШТУЧНО" — медленный, но надёжный режим ======================
+// Каждая строка целиком гонится через recognizeRow (одна картинка на
+// запрос). Дольше, чем bulkRecognize, но не подвержено "переносу ответа
+// на соседние ячейки" — полезно, если на конкретной выборке кросс-строчный
+// батч всё равно ведёт себя странно, или просто для контрольной проверки.
+async function bulkRecognizeOneByOne() {
+    if (!selected.size) { showToast('Сначала выделите строки галочкой слева', false); return; }
+    const ids = Array.from(selected);
+    const progressEl = document.getElementById('progressLine');
+    const barWrap = document.getElementById('progressBarWrap');
+    const barFill = document.getElementById('progressBarFill');
+    barWrap.classList.add('active');
+    barFill.style.width = '0%';
     let done = 0, matched = 0;
     for (const id of ids) {
-        progressEl.textContent = `🤖 Распознаю ${done + 1}/${ids.length} (чек #${id})…`;
+        progressEl.textContent = `🔍 Поштучно: ${done + 1}/${ids.length} (чек #${id})…`;
         const ok = await recognizeRow(id);
         if (ok) matched++;
         done++;
+        barFill.style.width = `${Math.round(done / ids.length * 100)}%`;
     }
-    progressEl.textContent = `Готово: обработано ${done}, найден рабочий фильтр для ${matched}, не найден для ${done - matched}.`;
-    showToast(`🤖 Готово: ${matched}/${done} чеков распознано`);
+    progressEl.textContent = `Готово (поштучно): обработано ${done}, найден рабочий фильтр для ${matched}, не найден для ${done - matched}.`;
+    setTimeout(() => { barWrap.classList.remove('active'); barFill.style.width = '0%'; }, 1500);
+    showToast(`🔍 Готово: ${matched}/${done} чеков распознано`);
 }
 
 function showToast(msg, success = true) {

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import io
 import re
@@ -714,39 +715,66 @@ async def api_apply_recipes_batch(payload: ApplyRecipesBatchRequest):
     return {"results": results, "width": bgr.shape[1], "height": bgr.shape[0]}
 
 
-class OcrCheckBatchRequest(BaseModel):
+class OcrBatchItem(BaseModel):
+    id: object  # id строки (int) — object чтобы не падать на нестандартном типе
     url: str
-    recipes: list[RecipeThumbItem]
 
 
-@app.post("/api/ocr-check-batch")
-async def api_ocr_check_batch(payload: OcrCheckBatchRequest):
-    """Как /api/ocr-check, но на ВСЕ фильтры одной строки — ОДИН удалённый
-    OCR-вызов вместо одного запроса на фильтр (см. extract_via_remote_ocr_batch).
-    Фото скачивается/декодируется один раз, как в /api/apply-recipes-batch."""
-    try:
-        bgr = fetch_image_bgr(payload.url)
-        if bgr is None:
-            return JSONResponse(status_code=400, content={"error": "Не удалось декодировать изображение"})
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": f"Не удалось скачать фото: {e}"})
+class OcrCheckFilterBatchRequest(BaseModel):
+    params: dict
+    items: list[OcrBatchItem]
+
+
+# ИЗМЕНЕНИЕ: сначала пробовали батчить фильтры ОДНОЙ строки в один
+# contact-sheet-запрос — Gemini путается, т.к. все ячейки такого листа
+# визуально ОДИН И ТОТ ЖЕ чек, и он копирует один найденный ответ на
+# соседние нечитаемые ячейки вместо честного null (см. скрин: "872"
+# на визуально разных фильтрах и даже между разными чеками). Раз ответ
+# не "0" — внутренний retry/dddd-фолбэк донора не срабатывает.
+# Правильный батч — наоборот: ОДИН фильтр × МНОГО РАЗНЫХ чеков (реально
+# разные картинки, как в вашем ocr_hard-тесте на 5352 капчах, где
+# путаницы не было). Именно так собирает пачку это эндпоинт — вызывается
+# из bulkRecognize с внешним циклом по фильтрам.
+OCR_CROSS_ROW_BATCH_CHUNK = int(os.environ.get("OCR_CROSS_ROW_BATCH_CHUNK", 40))
+
+
+@app.post("/api/ocr-check-filter-batch")
+async def api_ocr_check_filter_batch(payload: OcrCheckFilterBatchRequest):
+    """Один фильтр (params) применяется к N РАЗНЫМ чекам (разные url —
+    реально разные цифры), результаты батчатся в OCR чанками по
+    OCR_CROSS_ROW_BATCH_CHUNK и шлются параллельно. Возвращает список
+    {id, digits, source, error} в порядке payload.items."""
+    if not payload.items:
+        return JSONResponse(content={"results": []}, headers={"Cache-Control": "no-store"})
 
     images_bytes = []
     ok_ids = []
     results_by_id = {}
-    for item in payload.recipes:
+    for item in payload.items:
         try:
-            out = apply_recipe(bgr, item.params)
+            bgr = fetch_image_bgr(item.url)
+            if bgr is None:
+                results_by_id[item.id] = {"id": item.id, "digits": None, "source": None, "error": "не удалось декодировать изображение"}
+                continue
+            out = apply_recipe(bgr, payload.params)
             images_bytes.append(encode_png_bytes(out))
             ok_ids.append(item.id)
         except Exception as e:
             results_by_id[item.id] = {"id": item.id, "digits": None, "source": None, "error": str(e)}
 
-    ocr_results = extract_via_remote_ocr_batch(images_bytes)
-    for rid, (digits, source, err) in zip(ok_ids, ocr_results):
-        results_by_id[rid] = {"id": rid, "digits": digits, "source": source, "error": err}
+    chunk_size = max(1, OCR_CROSS_ROW_BATCH_CHUNK)
+    id_chunks = [ok_ids[i:i + chunk_size] for i in range(0, len(ok_ids), chunk_size)]
+    img_chunks = [images_bytes[i:i + chunk_size] for i in range(0, len(images_bytes), chunk_size)]
 
-    ordered = [results_by_id[item.id] for item in payload.recipes]
+    chunk_results = await asyncio.gather(*[
+        asyncio.to_thread(extract_via_remote_ocr_batch, chunk) for chunk in img_chunks
+    ])
+
+    for ids_part, results_part in zip(id_chunks, chunk_results):
+        for rid, (digits, source, err) in zip(ids_part, results_part):
+            results_by_id[rid] = {"id": rid, "digits": digits, "source": source, "error": err}
+
+    ordered = [results_by_id[item.id] for item in payload.items]
     return JSONResponse(content={"results": ordered}, headers={"Cache-Control": "no-store"})
 
 
