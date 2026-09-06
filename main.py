@@ -1148,6 +1148,7 @@ async def api_ocr_check(payload: OcrCheckRequest):
 
         if payload.params:
             processed = apply_recipe(bgr, payload.params)
+            processed = _cap_for_ocr(processed)
             digits, err = extract_via_remote_ocr(encode_png_bytes(processed))
         else:
             digits, err = extract_via_remote_ocr(fetch_image_bytes(payload.url))

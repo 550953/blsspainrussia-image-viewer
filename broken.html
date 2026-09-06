@@ -542,12 +542,18 @@ async function recognizeRow(rowId) {
     const statusEl = document.getElementById(`row-status-${rowId}`);
     if (!loadedRows.has(rowId)) { await loadRowThumbnails(rowId); }
     let found = false;
+    // ВАЖНО: раньше здесь был ранний выход по первому совпадению — быстрее,
+    // но оставлял все остальные ~25-30 колонок непроверенными (пусто), и
+    // не было видно, какие ещё фильтры вообще годятся для этой картинки.
+    // Тут это именно инструмент разбора одной строки целиком ("всю линию
+    // проверить"), поэтому идём по ВСЕМ рецептам без остановки — колонка
+    // "match" просто подсветится у всех, что совпали, а не только у первой.
     for (let i = 0; i < recipes.length; i++) {
         if (!rowScanState[rowId]?.scanning) break; // отменено
         const r = recipes[i];
         if (statusEl) statusEl.textContent = `🤖 сканирую ${i + 1}/${recipes.length}: ${r.name}…`;
         const matched = await checkCell(rowId, r.id);
-        if (matched) { found = true; break; }
+        if (matched) found = true;
     }
     if (statusEl) statusEl.textContent = found ? '✅ найден рабочий фильтр' : '⚠️ ни один фильтр не совпал — нужна ручная настройка';
     rowScanState[rowId] = { scanning: false };
