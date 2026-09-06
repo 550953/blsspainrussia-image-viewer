@@ -690,6 +690,19 @@ def _shrink_for_thumb(out: np.ndarray, max_side: int) -> np.ndarray:
     return out
 
 
+# Тот же ресайз, что и для превьюшек, но отдельная константа под OCR:
+# нужен, чтобы падало не только на "Оригинал (без обработки)" — рецепт
+# raw/без изменений отдаёт картинку в исходном разрешении с телефона,
+# и именно она (а не сами фильтры) раздувала base64-пейлоад на весь
+# батч и роняла запрос по таймауту на 0.1 vCPU Render. Применяем ПЕРЕД
+# отправкой в OCR всегда, независимо от того, что выбрал рецепт.
+OCR_MAX_SIDE = int(os.environ.get("OCR_MAX_SIDE", 900))
+
+
+def _cap_for_ocr(out: np.ndarray) -> np.ndarray:
+    return _shrink_for_thumb(out, OCR_MAX_SIDE)
+
+
 @app.post("/api/apply-recipes-batch")
 async def api_apply_recipes_batch(payload: ApplyRecipesBatchRequest):
     """Как /api/apply-recipe, но для ОДНОГО фото сразу считает превью ПОД
@@ -757,6 +770,7 @@ async def api_ocr_check_filter_batch(payload: OcrCheckFilterBatchRequest):
                 results_by_id[item.id] = {"id": item.id, "digits": None, "source": None, "error": "не удалось декодировать изображение"}
                 continue
             out = apply_recipe(bgr, payload.params)
+            out = _cap_for_ocr(out)
             images_bytes.append(encode_png_bytes(out))
             ok_ids.append(item.id)
         except Exception as e:
@@ -776,6 +790,205 @@ async def api_ocr_check_filter_batch(payload: OcrCheckFilterBatchRequest):
 
     ordered = [results_by_id[item.id] for item in payload.items]
     return JSONResponse(content={"results": ordered}, headers={"Cache-Control": "no-store"})
+
+
+# ============================================================
+#         ФОНОВЫЙ JOB ДЛЯ /api/ocr-check-filter-batch
+#
+#   Раньше весь прогон "по каждому фильтру — батч по ещё не найденным
+#   чекам" жил ЦЕЛИКОМ в JS-цикле bulkRecognize() во вкладке браузера:
+#   состояние (pending/matched, номер текущего фильтра) — в обычных
+#   JS-переменных. Закрыли вкладку, обновили страницу, легла сеть или
+#   раздутый "Оригинал" уронил один fetch без внятного catch — и весь
+#   прогресс терялся, начинай сначала.
+#
+#   Теперь job живёт в таблице ocr_jobs (см. 04_ocr_jobs.sql), а крутит
+#   его фоновый поток ВНУТРИ этого же процесса — без внешнего крона,
+#   ровно тот же приём, что и _ocr_keepalive_loop ниже. На редеплое
+#   Render поток умирает вместе с процессом, но состояние — в БД, а не
+#   в памяти, поэтому при старте процесса мы просто подхватываем job,
+#   если он остался в статусе running/stopping (см. _resume_ocr_jobs()
+#   в конце файла). Одновременно может идти только один job — это
+#   внутренний инструмент на одного оператора, не веб-сервис на разных
+#   пользователей, поэтому очередь из нескольких job'ов не нужна:
+#   уникальный частичный индекс в БД (см. SQL) просто не даст создать
+#   второй, пока первый running/stopping.
+# ============================================================
+class StartOcrJobRequest(BaseModel):
+    row_ids: list
+    recipes: list[dict]  # [{id, name, params}, ...] — порядок = порядок попыток
+
+
+def _ocr_job_pending_rows(row_ids: list) -> dict:
+    """id -> {url, label} для строк, которые ЕЩЁ не reviewed (не найден
+    рабочий фильтр). Источник истины по прогрессу — сама price_checks,
+    а не job: так поллинг всегда честный, даже если оператор в процессе
+    job'а вручную разметил строку из другого места."""
+    result = (supabase.table("price_checks")
+              .select("id,url,label,reviewed")
+              .in_("id", row_ids)
+              .execute())
+    return {r["id"]: r for r in result.data if not r.get("reviewed")}
+
+
+def _ocr_job_status(job_id: int) -> Optional[str]:
+    row = supabase.table("ocr_jobs").select("status").eq("id", job_id).maybe_single().execute().data
+    return row["status"] if row else None
+
+
+def _run_ocr_job(job_id: int):
+    try:
+        job = supabase.table("ocr_jobs").select("*").eq("id", job_id).single().execute().data
+    except Exception as e:
+        print(f"[ocr_job {job_id}] не удалось прочитать job: {e}")
+        return
+
+    row_ids = job["row_ids"]
+    recipes = job["recipes"]
+    results = job.get("results") or {}
+    chunk_size = max(1, OCR_CROSS_ROW_BATCH_CHUNK)
+
+    print(f"[ocr_job {job_id}] старт: {len(row_ids)} строк, {len(recipes)} фильтров, с фильтра #{job['current_recipe_idx']}")
+
+    for ri in range(job["current_recipe_idx"], len(recipes)):
+        pending = _ocr_job_pending_rows(row_ids)
+        if not pending:
+            break
+        if _ocr_job_status(job_id) == "stopping":
+            supabase.table("ocr_jobs").update({"status": "stopped"}).eq("id", job_id).execute()
+            print(f"[ocr_job {job_id}] остановлен оператором на фильтре #{ri}")
+            return
+
+        recipe = recipes[ri]
+        pending_ids = list(pending.keys())
+        id_chunks = [pending_ids[i:i + chunk_size] for i in range(0, len(pending_ids), chunk_size)]
+
+        for id_chunk in id_chunks:
+            if _ocr_job_status(job_id) == "stopping":
+                supabase.table("ocr_jobs").update({"status": "stopped"}).eq("id", job_id).execute()
+                print(f"[ocr_job {job_id}] остановлен оператором внутри фильтра #{ri}")
+                return
+
+            images_bytes = []
+            ok_ids = []
+            for rid in id_chunk:
+                try:
+                    bgr = fetch_image_bgr(pending[rid]["url"])
+                    if bgr is None:
+                        continue
+                    out = apply_recipe(bgr, recipe["params"])
+                    out = _cap_for_ocr(out)
+                    images_bytes.append(encode_png_bytes(out))
+                    ok_ids.append(rid)
+                except Exception as e:
+                    print(f"[ocr_job {job_id}] чек #{rid} — ошибка обработки: {e}")
+
+            chunk_results = extract_via_remote_ocr_batch(images_bytes)
+            for rid, (digits, source, err) in zip(ok_ids, chunk_results):
+                label = str(pending[rid].get("label") or "")
+                is_match = bool(digits and label and digits.lstrip("0") == label.lstrip("0"))
+                results.setdefault(str(rid), {})[str(recipe["id"])] = {
+                    "digits": digits, "match": is_match, "error": err,
+                }
+                if is_match:
+                    supabase.table("price_checks").update({
+                        "best_recipe_id": recipe["id"], "reviewed": True,
+                    }).eq("id", rid).execute()
+
+            supabase.table("ocr_jobs").update({"results": results}).eq("id", job_id).execute()
+
+        supabase.table("ocr_jobs").update({"current_recipe_idx": ri + 1}).eq("id", job_id).execute()
+
+    supabase.table("ocr_jobs").update({"status": "done"}).eq("id", job_id).execute()
+    print(f"[ocr_job {job_id}] готово")
+
+
+@app.post("/api/ocr-jobs")
+async def start_ocr_job(payload: StartOcrJobRequest):
+    try:
+        require_supabase()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    if not payload.row_ids:
+        return JSONResponse(status_code=400, content={"error": "Нужны row_ids"})
+
+    try:
+        job = supabase.table("ocr_jobs").insert({
+            "row_ids": payload.row_ids,
+            "recipes": payload.recipes,
+        }).execute().data[0]
+    except Exception:
+        # уникальный индекс на "только один активный job" не дал вставить —
+        # значит, job уже идёт; отдаём его фронту вместо ошибки.
+        active = (supabase.table("ocr_jobs").select("*")
+                  .in_("status", ["running", "stopping"])
+                  .order("id", desc=True).limit(1).execute().data)
+        if active:
+            return active[0]
+        return JSONResponse(status_code=500, content={"error": "Не удалось создать job"})
+
+    threading.Thread(target=_run_ocr_job, args=(job["id"],), daemon=True).start()
+    return job
+
+
+@app.post("/api/ocr-jobs/{job_id}/stop")
+async def stop_ocr_job(job_id: int):
+    try:
+        require_supabase()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    supabase.table("ocr_jobs").update({"status": "stopping"}).eq("id", job_id).execute()
+    return {"message": "ok"}
+
+
+@app.get("/api/ocr-jobs/active")
+async def get_active_ocr_job():
+    """Фронт дёргает это при загрузке /broken — если job уже идёт (в т.ч.
+    после редеплоя, пока вы читали лог), прогресс-бар и ячейки оживают
+    сами, без повторного нажатия кнопки."""
+    try:
+        require_supabase()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    rows = (supabase.table("ocr_jobs").select("*")
+            .in_("status", ["running", "stopping"])
+            .order("id", desc=True).limit(1).execute().data)
+    return {"job": rows[0] if rows else None}
+
+
+@app.get("/api/ocr-jobs/{job_id}")
+async def get_ocr_job(job_id: int):
+    try:
+        require_supabase()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    row = supabase.table("ocr_jobs").select("*").eq("id", job_id).maybe_single().execute().data
+    if not row:
+        return JSONResponse(status_code=404, content={"error": "Job не найден"})
+    return {"job": row}
+
+
+def _resume_ocr_jobs():
+    """Вызывается один раз при старте процесса. Если процесс перезапустился
+    (редеплой, падение по памяти, сон/пробуждение на Render) посреди
+    job'а — статус в БД остался running/stopping, а поток, который его
+    крутил, умер вместе со старым процессом. Поднимаем новый поток с того
+    же current_recipe_idx, ничего не пересчитывая с нуля."""
+    if supabase is None:
+        return
+    try:
+        rows = (supabase.table("ocr_jobs").select("*")
+                .in_("status", ["running", "stopping"]).execute().data)
+    except Exception as e:
+        print(f"[ocr_job] не удалось проверить незавершённые job'ы: {e}")
+        return
+    for job in rows:
+        print(f"[ocr_job {job['id']}] подхватываю после рестарта процесса (статус={job['status']})")
+        threading.Thread(target=_run_ocr_job, args=(job["id"],), daemon=True).start()
+
+
+_resume_ocr_jobs()
 
 
 class RecipeIn(BaseModel):

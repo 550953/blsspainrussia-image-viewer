@@ -151,7 +151,8 @@
         <button onclick="toggleSelectAllVisible()">☑️ Выделить всё / снять</button>
         <span>Выбрано: <span class="sel-count" id="selCount">0</span></span>
         <div class="spacer"></div>
-        <button class="primary" onclick="bulkRecognize()">🤖 Распознать в ОЦР (для выбранных)</button>
+        <button class="primary" id="bulkRecognizeBtn" onclick="bulkRecognize()">🤖 Распознать в ОЦР (для выбранных)</button>
+        <button id="stopOcrJobBtn" style="display:none" onclick="stopOcrJob()">⏹ Остановить</button>
         <button onclick="bulkRecognizeOneByOne()" title="Медленнее, но каждая картинка отдельным запросом — без риска, что Gemini спутает соседние ячейки">🔍 Прочесть поштучно</button>
     </div>
     <div class="progress-bar-wrap" id="progressBarWrap"><div class="progress-bar-fill" id="progressBarFill"></div></div>
@@ -189,6 +190,7 @@ const loadedRows = new Set();
 const loadingRows = new Set();
 
 window.addEventListener('DOMContentLoaded', load);
+window.addEventListener('DOMContentLoaded', checkForActiveJob);
 window.addEventListener('DOMContentLoaded', () => { refreshOcrStatus(); setInterval(refreshOcrStatus, 30000); });
 
 // ====================== СТАТУС OCR-ДОНОРА (не блокирует работу) ======================
@@ -559,70 +561,136 @@ async function recognizeRow(rowId) {
 // строки" (картинки в пачке реально разные — ровно тот сценарий, что
 // у вас нормально работал на 5352 разных капчах). Строка, для которой
 // нашлось совпадение, выбывает из следующих раундов.
+//
+// САМ ЦИКЛ теперь крутится на сервере (см. /api/ocr-jobs* в main.py) —
+// эта функция только СТАРТУЕТ job и поллит его статус. Раньше цикл жил
+// в этой вкладке: закрыли/обновили страницу, легла сеть, "Оригинал"
+// уронил fetch без внятного catch — весь прогресс терялся. Теперь job
+// переживает всё это, включая редеплой сервиса (см. _resume_ocr_jobs
+// в main.py) — можно закрыть вкладку и вернуться позже.
+let currentJobId = null;
+let jobPollTimer = null;
+
 async function bulkRecognize() {
     if (!selected.size) { showToast('Сначала выделите строки галочкой слева', false); return; }
     const ids = Array.from(selected);
-    const progressEl = document.getElementById('progressLine');
-    const barWrap = document.getElementById('progressBarWrap');
-    const barFill = document.getElementById('progressBarFill');
-    barWrap.classList.add('active');
-    barFill.style.width = '0%';
-
-    // подгружаем превью параллельно (не блокируя друг друга) там, где их ещё нет
     await Promise.all(ids.filter(id => !loadedRows.has(id)).map(id => loadRowThumbnails(id)));
 
-    const totalRows = ids.length;
-    let pending = new Set(ids);
-    let matched = new Set();
+    try {
+        const resp = await fetch('/api/ocr-jobs', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                row_ids: ids,
+                recipes: recipes.map(r => ({ id: r.id, name: r.name, params: r.params })),
+            }),
+        });
+        const job = await resp.json();
+        if (job.error) { showToast(`❌ ${job.error}`, false); return; }
+        attachToJob(job);
+    } catch (e) {
+        showToast(`❌ Не удалось запустить распознавание: ${e}`, false);
+    }
+}
 
-    for (let ri = 0; ri < recipes.length && pending.size; ri++) {
-        const recipe = recipes[ri];
-        const pendingArr = Array.from(pending);
-        progressEl.textContent = `🤖 фильтр ${ri + 1}/${recipes.length} (${recipe.name}) — проверяю ${pendingArr.length} чек(ов)…`;
-        try {
-            const resp = await fetch('/api/ocr-check-filter-batch', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    params: recipe.params,
-                    items: pendingArr.map(id => ({ id, url: rowsById[id].url })),
-                }),
-            });
-            const data = await resp.json();
-            for (const item of (data.results || [])) {
-                const rowId = item.id;
-                const row = rowsById[rowId];
-                const ocrEl = document.getElementById(`ocr-${rowId}-${recipe.id}`);
-                const cellEl = document.getElementById(`cell-${rowId}-${recipe.id}`);
-                const label = String(row?.label || '');
-                const digits = item.digits;
-                const isMatch = !!(digits && label && digits.replace(/^0+/, '') === label.replace(/^0+/, ''));
-                if (ocrEl) {
-                    ocrEl.textContent = digits ? digits : '—';
-                    ocrEl.className = 'cell-ocr ' + (digits ? (isMatch ? 'match' : 'mismatch') : 'mismatch');
-                }
-                cellEl?.classList.toggle('cell-match', isMatch);
-                if (isMatch) {
-                    pending.delete(rowId);
-                    matched.add(rowId);
-                    await markUsed(rowId, recipe.id);
-                    const statusEl = document.getElementById(`row-status-${rowId}`);
-                    if (statusEl) statusEl.textContent = '✅ найден рабочий фильтр';
-                }
-            }
-        } catch (e) {
-            progressEl.textContent = `❌ ошибка на фильтре "${recipe.name}": ${e}`;
+async function stopOcrJob() {
+    if (!currentJobId) return;
+    document.getElementById('stopOcrJobBtn').disabled = true;
+    try {
+        await fetch(`/api/ocr-jobs/${currentJobId}/stop`, { method: 'POST' });
+    } catch (e) {
+        showToast(`❌ Не удалось остановить: ${e}`, false);
+        document.getElementById('stopOcrJobBtn').disabled = false;
+    }
+}
+
+// Вызывается и сразу после старта job'а, и при загрузке страницы, если
+// нашёлся уже идущий job (см. checkForActiveJob ниже) — оба случая
+// рисуют прогресс одинаково.
+function attachToJob(job) {
+    currentJobId = job.id;
+    document.getElementById('bulkRecognizeBtn').style.display = 'none';
+    document.getElementById('stopOcrJobBtn').style.display = '';
+    document.getElementById('stopOcrJobBtn').disabled = false;
+    document.getElementById('progressBarWrap').classList.add('active');
+    clearInterval(jobPollTimer);
+    jobPollTimer = setInterval(() => pollOcrJob(job.id), 1500);
+    pollOcrJob(job.id);
+}
+
+async function pollOcrJob(jobId) {
+    let job;
+    try {
+        const resp = await fetch(`/api/ocr-jobs/${jobId}`);
+        const data = await resp.json();
+        if (data.error) { throw new Error(data.error); }
+        job = data.job;
+    } catch (e) {
+        document.getElementById('progressLine').textContent = `❌ ошибка опроса job'а: ${e}`;
+        return;
+    }
+
+    renderJobResults(job);
+
+    const totalRows = job.row_ids.length;
+    const matchedRows = job.row_ids.filter(rid => {
+        const perRow = job.results[String(rid)] || {};
+        return Object.values(perRow).some(r => r.match);
+    }).length;
+    const barFill = document.getElementById('progressBarFill');
+    const progressEl = document.getElementById('progressLine');
+    barFill.style.width = `${Math.round(matchedRows / totalRows * 100)}%`;
+
+    if (job.status === 'running' || job.status === 'stopping') {
+        const recipeName = recipes[job.current_recipe_idx]?.name || '…';
+        const suffix = job.status === 'stopping' ? ' (останавливаюсь…)' : '';
+        progressEl.textContent = `🤖 фильтр ${job.current_recipe_idx + 1}/${recipes.length} (${recipeName}) — найдено ${matchedRows}/${totalRows}${suffix}`;
+        return;
+    }
+
+    clearInterval(jobPollTimer);
+    currentJobId = null;
+    document.getElementById('bulkRecognizeBtn').style.display = '';
+    document.getElementById('stopOcrJobBtn').style.display = 'none';
+
+    for (const rid of job.row_ids) {
+        const perRow = job.results[String(rid)] || {};
+        const hasMatch = Object.values(perRow).some(r => r.match);
+        const statusEl = document.getElementById(`row-status-${rid}`);
+        if (statusEl) {
+            statusEl.textContent = hasMatch ? '✅ найден рабочий фильтр'
+                : '⚠️ ни один фильтр не совпал — нужна ручная настройка';
         }
-        barFill.style.width = `${Math.round((totalRows - pending.size) / totalRows * 100)}%`;
     }
 
-    for (const rowId of pending) {
-        const statusEl = document.getElementById(`row-status-${rowId}`);
-        if (statusEl) statusEl.textContent = '⚠️ ни один фильтр не совпал — нужна ручная настройка';
-    }
+    const label = job.status === 'stopped' ? 'Остановлено' : 'Готово';
+    progressEl.textContent = `${label}: обработано ${totalRows}, найден рабочий фильтр для ${matchedRows}, не найден для ${totalRows - matchedRows}.`;
+    setTimeout(() => { document.getElementById('progressBarWrap').classList.remove('active'); barFill.style.width = '0%'; }, 1500);
+    showToast(`🤖 ${label}: ${matchedRows}/${totalRows} чеков распознано`);
+}
 
-    progressEl.textContent = `Готово: обработано ${totalRows}, найден рабочий фильтр для ${matched.size}, не найден для ${pending.size}.`;
-    setTimeout(() => { barWrap.classList.remove('active'); barFill.style.width = '0%'; }, 1500);
-    showToast(`🤖 Готово: ${matched.size}/${totalRows} чеков распознано`);
+function renderJobResults(job) {
+    for (const [rowIdStr, perRow] of Object.entries(job.results || {})) {
+        for (const [recipeIdStr, r] of Object.entries(perRow)) {
+            const ocrEl = document.getElementById(`ocr-${rowIdStr}-${recipeIdStr}`);
+            const cellEl = document.getElementById(`cell-${rowIdStr}-${recipeIdStr}`);
+            if (ocrEl) {
+                ocrEl.textContent = r.digits ? r.digits : '—';
+                ocrEl.className = 'cell-ocr ' + (r.digits ? (r.match ? 'match' : 'mismatch') : 'mismatch');
+            }
+            cellEl?.classList.toggle('cell-match', !!r.match);
+        }
+    }
+}
+
+// Дергается при загрузке страницы — если job уже идёт (открыли вкладку
+// заново, или процесс на сервере успел передеплоиться посреди job'а),
+// прогресс-бар и ячейки оживают сами, без повторного нажатия кнопки.
+async function checkForActiveJob() {
+    try {
+        const resp = await fetch('/api/ocr-jobs/active');
+        const data = await resp.json();
+        if (data.job) attachToJob(data.job);
+    } catch (e) { /* тихо игнорируем — не критично при загрузке страницы */ }
 }
 
 // ====================== "ПРОЧЕСТЬ ПОШТУЧНО" — медленный, но надёжный режим ======================
