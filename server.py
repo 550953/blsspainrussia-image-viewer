@@ -424,21 +424,29 @@ def extract_via_remote_ocr(image_bytes: bytes):
     Возвращает (digits_str_or_None, error_or_None)."""
     if not OCR_REMOTE_URL:
         return None, "OCR_REMOTE_URL не задан"
+
+    t0 = time.monotonic()
     try:
         resp = _post_to_remote_ocr(image_bytes, OCR_REMOTE_TIMEOUT)
         resp.raise_for_status()
+        print(f"[remote_ocr] ok за {time.monotonic() - t0:.1f}с, status={resp.status_code}")
     except requests.exceptions.Timeout:
+        print(f"[remote_ocr] ТАЙМАУТ на {OCR_REMOTE_TIMEOUT:.0f}с (прошло {time.monotonic() - t0:.1f}с) — повтор с {OCR_REMOTE_COLD_START_TIMEOUT:.0f}с")
         # Похоже на холодный старт free-tier инстанса — даём ему ещё один
         # шанс с большим таймаутом, вместо того чтобы сразу сдаваться.
+        t1 = time.monotonic()
         try:
             resp = _post_to_remote_ocr(image_bytes, OCR_REMOTE_COLD_START_TIMEOUT)
             resp.raise_for_status()
+            print(f"[remote_ocr] повтор ok за {time.monotonic() - t1:.1f}с, status={resp.status_code}")
         except requests.exceptions.RequestException as e:
+            print(f"[remote_ocr] повтор ПРОВАЛИЛСЯ за {time.monotonic() - t1:.1f}с: {type(e).__name__}: {e}")
             return None, (
                 f"OCR-сервис не ответил даже за {OCR_REMOTE_COLD_START_TIMEOUT:.0f} сек "
                 f"(похоже на холодный старт Render, но что-то пошло не так): {e}"
             )
     except requests.exceptions.RequestException as e:
+        print(f"[remote_ocr] ОШИБКА за {time.monotonic() - t0:.1f}с: {type(e).__name__}: {e}")
         return None, f"OCR-сервис недоступен ({OCR_REMOTE_URL}): {e}"
 
     raw_text = None
@@ -459,7 +467,9 @@ def extract_via_remote_ocr(image_bytes: bytes):
 
     digits = re.sub(r"\D", "", raw_text or "")
     if not digits:
+        print(f"[remote_ocr] цифры не найдены, сырой ответ: {raw_text!r}")
         return None, f"цифры не найдены в ответе OCR-сервиса (сырой ответ: {raw_text[:200]!r})"
+    print(f"[remote_ocr] распознано: {digits}")
     return digits, None
 
 
