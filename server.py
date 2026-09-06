@@ -34,6 +34,7 @@ import pandas as pd
 import uvicorn
 from supabase import create_client, Client
 
+import datetime
 from filters_engine import apply_recipe
 # Локальный pytesseract (ocr_engine.py) больше не используется в эндпоинтах —
 # распознавание теперь идёт через внешний сервис (см. OCR_REMOTE_URL ниже).
@@ -41,6 +42,11 @@ from filters_engine import apply_recipe
 # from ocr_engine import extract_digits_from_array, extract_price_from_bgr
 
 app = FastAPI()
+
+# Время старта процесса — маячок для тестирования деплоя/OCR: если после
+# git push это значение в /api/status не поменялось, значит крутится
+# СТАРЫЙ процесс (деплой не подхватился), а не новый код с удалённым OCR.
+PROCESS_STARTED_AT = datetime.datetime.utcnow().isoformat() + "Z"
 
 app.add_middleware(
     CORSMiddleware,
@@ -278,6 +284,11 @@ async def api_status():
         "ocr_remote_url": OCR_REMOTE_URL,
         "ocr_available": bool(OCR_REMOTE_URL),
         "ocr_error": None if OCR_REMOTE_URL else "OCR_REMOTE_URL не задан",
+        # маячок: если это время не совпадает с реальным временем последнего
+        # деплоя (Render → Events), значит смотрите на старый процесс, а не
+        # на кэш браузера — POST-эндпоинты (/api/ocr-check и т.п.) браузер
+        # не кеширует вовсе, а этот GET теперь явно помечен no-store ниже.
+        "process_started_at": PROCESS_STARTED_AT,
     }
     if supabase is not None:
         try:
@@ -287,7 +298,7 @@ async def api_status():
         except Exception as e:
             status["error"] = str(e)
 
-    return status
+    return JSONResponse(content=status, headers={"Cache-Control": "no-store"})
 
 
 # ============================================================
@@ -388,8 +399,23 @@ def encode_png_base64(arr: np.ndarray) -> str:
 #   код её не касается.
 # ============================================================
 OCR_REMOTE_URL = os.environ.get("OCR_REMOTE_URL", "https://bls.shikinn.com/ocr")
-OCR_REMOTE_TIMEOUT = float(os.environ.get("OCR_REMOTE_TIMEOUT", 20))
+# Free-tier Render засыпает через ~15 мин простоя и просыпается 30-50 сек
+# (см. комментарий в Dockerfile). 20 сек таймаута на это не хватает — запрос
+# обрывался по таймауту, а следующий клик уже попадал в проснувшийся
+# инстанс и работал, создавая ложное впечатление "откуда-то берёт ответ
+# помимо этого сервиса". Поднял таймаут и добавил один автоповтор с ещё
+# большим таймаутом именно на случай холодного старта.
+OCR_REMOTE_TIMEOUT = float(os.environ.get("OCR_REMOTE_TIMEOUT", 45))
+OCR_REMOTE_COLD_START_TIMEOUT = float(os.environ.get("OCR_REMOTE_COLD_START_TIMEOUT", 70))
 OCR_REMOTE_FIELD_NAME = os.environ.get("OCR_REMOTE_FIELD_NAME", "file")
+
+
+def _post_to_remote_ocr(image_bytes: bytes, timeout: float):
+    return requests.post(
+        OCR_REMOTE_URL,
+        files={OCR_REMOTE_FIELD_NAME: ("image.jpg", image_bytes, "application/octet-stream")},
+        timeout=timeout,
+    )
 
 
 def extract_via_remote_ocr(image_bytes: bytes):
@@ -399,12 +425,19 @@ def extract_via_remote_ocr(image_bytes: bytes):
     if not OCR_REMOTE_URL:
         return None, "OCR_REMOTE_URL не задан"
     try:
-        resp = requests.post(
-            OCR_REMOTE_URL,
-            files={OCR_REMOTE_FIELD_NAME: ("image.jpg", image_bytes, "application/octet-stream")},
-            timeout=OCR_REMOTE_TIMEOUT,
-        )
+        resp = _post_to_remote_ocr(image_bytes, OCR_REMOTE_TIMEOUT)
         resp.raise_for_status()
+    except requests.exceptions.Timeout:
+        # Похоже на холодный старт free-tier инстанса — даём ему ещё один
+        # шанс с большим таймаутом, вместо того чтобы сразу сдаваться.
+        try:
+            resp = _post_to_remote_ocr(image_bytes, OCR_REMOTE_COLD_START_TIMEOUT)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            return None, (
+                f"OCR-сервис не ответил даже за {OCR_REMOTE_COLD_START_TIMEOUT:.0f} сек "
+                f"(похоже на холодный старт Render, но что-то пошло не так): {e}"
+            )
     except requests.exceptions.RequestException as e:
         return None, f"OCR-сервис недоступен ({OCR_REMOTE_URL}): {e}"
 
@@ -622,9 +655,12 @@ async def api_ocr_check(payload: OcrCheckRequest):
         else:
             digits, err = extract_via_remote_ocr(fetch_image_bytes(payload.url))
 
-        return {"digits": digits, "error": err}
+        return JSONResponse(
+            content={"digits": digits, "error": err},
+            headers={"Cache-Control": "no-store"},
+        )
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Ошибка OCR: {e}"})
+        return JSONResponse(status_code=500, content={"error": f"Ошибка OCR: {e}"}, headers={"Cache-Control": "no-store"})
 
 
 class OcrScanRequest(BaseModel):
