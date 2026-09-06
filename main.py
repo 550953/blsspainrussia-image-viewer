@@ -512,6 +512,131 @@ def extract_via_remote_ocr(image_bytes: bytes):
     return digits, None
 
 
+def extract_via_remote_ocr_batch(images_bytes: list):
+    """То же самое, что extract_via_remote_ocr, но ОДНИМ HTTP-запросом
+    на N картинок сразу — именно под это спроектирован bls.shikinn.com/ocr
+    (contact-sheet, до 500 картинок, ~12-25 шт/сек по замерам). Раньше
+    фронт бил его по одной картинке за раз (checkCell -> /api/ocr-check
+    в цикле по всем фильтрам строки), из-за чего каждая ячейка платила
+    полный цикл ключ->прокси->Gemini ради одной картинки, и вся строка
+    последовательно копила эти 1.5-3.5с (а при холодном старте/rate-limit
+    — 45-70с таймауты) вместо одного быстрого батча.
+
+    Возвращает список (digits_or_None, source_or_None, error_or_None) —
+    в том же порядке, что images_bytes."""
+    if not images_bytes:
+        return []
+    if not OCR_REMOTE_URL:
+        return [(None, None, "OCR_REMOTE_URL не задан")] * len(images_bytes)
+
+    b64_list = [base64.b64encode(b).decode("ascii") for b in images_bytes]
+    t0 = time.monotonic()
+    try:
+        resp = requests.post(OCR_REMOTE_URL, json={"images": b64_list}, timeout=OCR_REMOTE_TIMEOUT)
+        if resp.status_code == 429:
+            wait_s = _retry_after_seconds(resp)
+            print(f"[remote_ocr_batch] 429 — жду {wait_s:.1f}с и пробую ещё раз")
+            time.sleep(wait_s)
+            resp = requests.post(OCR_REMOTE_URL, json={"images": b64_list}, timeout=OCR_REMOTE_TIMEOUT)
+        resp.raise_for_status()
+        print(f"[remote_ocr_batch] ok за {time.monotonic() - t0:.1f}с, {len(images_bytes)} шт")
+    except requests.exceptions.Timeout:
+        print(f"[remote_ocr_batch] ТАЙМАУТ на {OCR_REMOTE_TIMEOUT:.0f}с — повтор с {OCR_REMOTE_COLD_START_TIMEOUT:.0f}с (холодный старт?)")
+        try:
+            resp = requests.post(OCR_REMOTE_URL, json={"images": b64_list}, timeout=OCR_REMOTE_COLD_START_TIMEOUT)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            return [(None, None, f"OCR-сервис не ответил даже за {OCR_REMOTE_COLD_START_TIMEOUT:.0f}с: {e}")] * len(images_bytes)
+    except requests.exceptions.RequestException as e:
+        print(f"[remote_ocr_batch] ОШИБКА за {time.monotonic() - t0:.1f}с: {type(e).__name__}: {e}")
+        return [(None, None, f"OCR-сервис недоступен ({OCR_REMOTE_URL}): {e}")] * len(images_bytes)
+
+    try:
+        data = resp.json()
+        results = data.get("results") or []
+    except ValueError as e:
+        print(f"[remote_ocr_batch] не удалось разобрать ответ: {e}, сырой ответ: {resp.text[:200]!r}")
+        return [(None, None, f"неожиданный формат ответа OCR-сервиса: {e}")] * len(images_bytes)
+
+    out = []
+    for i in range(len(images_bytes)):
+        item = results[i] if i < len(results) else {}
+        raw_text = (item or {}).get("text")
+        source = (item or {}).get("source")
+        if not raw_text or raw_text == "0":
+            out.append((None, source, f"не распознано (source={source})"))
+            continue
+        digits = re.sub(r"\D", "", raw_text)
+        out.append((digits, source, None) if digits else (None, source, f"в ответе нет цифр: {raw_text!r}"))
+    return out
+
+
+# ============================================================
+#              БЫСТРЫЙ СТАТУС OCR-ДОНОРА (bls.shikinn.com)
+#
+#   Раньше единственный способ узнать "спит ли OCR" — это дождаться
+#   таймаута/повтора внутри самого OCR-запроса (до 45+70 сек). Теперь:
+#   отдельная лёгкая ручка /api/ocr-health с кэшем, который фоновый
+#   поток обновляет каждые OCR_HEALTH_PING_INTERVAL секунд — заодно
+#   это и есть keep-alive пинг, чтобы Render-донор не засыпал.
+# ============================================================
+OCR_REMOTE_HEALTH_URL = os.environ.get(
+    "OCR_REMOTE_HEALTH_URL",
+    OCR_REMOTE_URL.rsplit("/", 1)[0] + "/health" if OCR_REMOTE_URL else "",
+)
+OCR_HEALTH_PING_INTERVAL = float(os.environ.get("OCR_HEALTH_PING_INTERVAL", 600))  # 10 мин
+
+_ocr_health_cache = {"ok": None, "checked_at": 0.0, "detail": None}
+_ocr_health_lock = threading.Lock()
+
+
+def _refresh_ocr_health(timeout: float = 6.0):
+    ok, detail = None, None
+    try:
+        r = requests.get(OCR_REMOTE_HEALTH_URL, timeout=timeout)
+        ok = r.status_code == 200
+        if ok:
+            try:
+                detail = r.json()
+            except ValueError:
+                detail = None
+    except Exception as e:
+        ok, detail = False, str(e)
+    with _ocr_health_lock:
+        _ocr_health_cache.update({"ok": ok, "checked_at": time.monotonic(), "detail": detail})
+    print(f"[ocr_health] {'OK' if ok else 'НЕДОСТУПЕН'}")
+    return dict(_ocr_health_cache)
+
+
+def _ocr_keepalive_loop():
+    while True:
+        try:
+            _refresh_ocr_health()
+        except Exception as e:
+            print(f"[ocr_health] ошибка фонового пинга: {e}")
+        time.sleep(OCR_HEALTH_PING_INTERVAL)
+
+
+if OCR_REMOTE_HEALTH_URL:
+    threading.Thread(target=_ocr_keepalive_loop, daemon=True).start()
+
+
+@app.get("/api/ocr-health")
+async def api_ocr_health():
+    """Мгновенный ответ из кэша — не ждём и не будим сервис синхронно.
+    Если кэш ещё вообще пустой (первый запрос после деплоя), даём фронту
+    честное 'unknown', а фоновый поток обновит его в ближайшие секунды."""
+    with _ocr_health_lock:
+        cache = dict(_ocr_health_cache)
+    if cache["checked_at"] == 0.0:
+        return {"ok": None, "checked_seconds_ago": None, "detail": None}
+    return {
+        "ok": cache["ok"],
+        "checked_seconds_ago": round(time.monotonic() - cache["checked_at"], 1),
+        "detail": cache["detail"],
+    }
+
+
 # ============================================================
 #     ФИЛЬТРЫ КАК ДАННЫЕ: генератор превью по params + CRUD рецептов
 #
@@ -587,6 +712,42 @@ async def api_apply_recipes_batch(payload: ApplyRecipesBatchRequest):
         except Exception as e:
             results.append({"id": item.id, "error": str(e)})
     return {"results": results, "width": bgr.shape[1], "height": bgr.shape[0]}
+
+
+class OcrCheckBatchRequest(BaseModel):
+    url: str
+    recipes: list[RecipeThumbItem]
+
+
+@app.post("/api/ocr-check-batch")
+async def api_ocr_check_batch(payload: OcrCheckBatchRequest):
+    """Как /api/ocr-check, но на ВСЕ фильтры одной строки — ОДИН удалённый
+    OCR-вызов вместо одного запроса на фильтр (см. extract_via_remote_ocr_batch).
+    Фото скачивается/декодируется один раз, как в /api/apply-recipes-batch."""
+    try:
+        bgr = fetch_image_bgr(payload.url)
+        if bgr is None:
+            return JSONResponse(status_code=400, content={"error": "Не удалось декодировать изображение"})
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": f"Не удалось скачать фото: {e}"})
+
+    images_bytes = []
+    ok_ids = []
+    results_by_id = {}
+    for item in payload.recipes:
+        try:
+            out = apply_recipe(bgr, item.params)
+            images_bytes.append(encode_png_bytes(out))
+            ok_ids.append(item.id)
+        except Exception as e:
+            results_by_id[item.id] = {"id": item.id, "digits": None, "source": None, "error": str(e)}
+
+    ocr_results = extract_via_remote_ocr_batch(images_bytes)
+    for rid, (digits, source, err) in zip(ok_ids, ocr_results):
+        results_by_id[rid] = {"id": rid, "digits": digits, "source": source, "error": err}
+
+    ordered = [results_by_id[item.id] for item in payload.recipes]
+    return JSONResponse(content={"results": ordered}, headers={"Cache-Control": "no-store"})
 
 
 class RecipeIn(BaseModel):

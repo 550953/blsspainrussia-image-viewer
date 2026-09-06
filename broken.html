@@ -13,6 +13,10 @@
     .summary { color:#888; font-size:13px; margin-bottom:12px; }
 
     .toolbar { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
+    .ocr-status { font-size:12px; font-weight:600; padding:3px 10px; border-radius:12px; margin-left:12px; vertical-align:middle; }
+    .ocr-status-unknown { background:#333; color:#aaa; }
+    .ocr-status-ok { background:#1b3a1b; color:#7ee787; }
+    .ocr-status-down { background:#3a1b1b; color:#ff7b7b; }
     .toolbar button { padding:8px 14px; border-radius:6px; border:1px solid #2a2d36; background:#2a2d36; color:#e4e6eb; cursor:pointer; font-size:13px; font-weight:600; }
     .toolbar button:hover { background:#3a3d46; }
     .toolbar button.primary { background:#3b5998; border-color:#4c6ef5; }
@@ -134,7 +138,9 @@
 </head>
 <body>
 <div class="container">
-    <h1>🐞 Проблемные чеки <a class="back" href="/">← назад к чекам</a></h1>
+    <h1>🐞 Проблемные чеки <a class="back" href="/">← назад к чекам</a>
+        <span id="ocrStatusBadge" class="ocr-status ocr-status-unknown" title="Статус OCR-донора">OCR: …</span>
+    </h1>
     <div class="summary" id="summary">Загрузка…</div>
     <div class="toolbar">
         <button onclick="expandAll(true)">Развернуть все группы</button>
@@ -178,6 +184,30 @@ const loadedRows = new Set();
 const loadingRows = new Set();
 
 window.addEventListener('DOMContentLoaded', load);
+window.addEventListener('DOMContentLoaded', () => { refreshOcrStatus(); setInterval(refreshOcrStatus, 30000); });
+
+// ====================== СТАТУС OCR-ДОНОРА (не блокирует работу) ======================
+async function refreshOcrStatus() {
+    const el = document.getElementById('ocrStatusBadge');
+    if (!el) return;
+    try {
+        const resp = await fetch('/api/ocr-health');
+        const data = await resp.json();
+        if (data.ok === true) {
+            el.textContent = 'OCR: ✅ готов';
+            el.className = 'ocr-status ocr-status-ok';
+        } else if (data.ok === false) {
+            el.textContent = 'OCR: 🔄 просыпается…';
+            el.className = 'ocr-status ocr-status-down';
+        } else {
+            el.textContent = 'OCR: …';
+            el.className = 'ocr-status ocr-status-unknown';
+        }
+    } catch (e) {
+        el.textContent = 'OCR: ❌ нет связи';
+        el.className = 'ocr-status ocr-status-down';
+    }
+}
 
 async function load() {
     document.getElementById('summary').textContent = 'Загрузка…';
@@ -490,21 +520,56 @@ async function checkCell(rowId, recipeId) {
     }
 }
 
-// ====================== "РАСПОЗНАТЬ В ОЦР": перебор всех фильтров строки с ранним выходом ======================
+// ====================== "РАСПОЗНАТЬ В ОЦР": ОДИН батч-запрос на всю строку ======================
+// Раньше здесь был цикл по всем фильтрам с ОТДЕЛЬНЫМ HTTP-запросом на
+// каждый (checkCell в for) — это и есть причина "дошло до Оригинала и
+// зависло": донор заточен под пачки до 500 картинок за раз, а мы били
+// его по одной, платя полный цикл ключ->прокси->Gemini ради 1 ячейки.
+// Теперь все фильтры строки уходят ОДНИМ запросом в /api/ocr-check-batch.
 async function recognizeRow(rowId) {
     if (rowScanState[rowId]?.scanning) return;
     rowScanState[rowId] = { scanning: true };
     const statusEl = document.getElementById(`row-status-${rowId}`);
+    const row = rowsById[rowId];
+    if (!row) { rowScanState[rowId] = { scanning: false }; return false; }
     // сначала убеждаемся, что превью подгружены (чтобы миниатюры не остались пустыми)
     if (!loadedRows.has(rowId)) { await loadRowThumbnails(rowId); }
+
+    if (statusEl) statusEl.textContent = `🤖 распознаю ${recipes.length} фильтров одним запросом…`;
+
     let found = false;
-    for (let i = 0; i < recipes.length; i++) {
-        if (!rowScanState[rowId]?.scanning) break; // отменено
-        const r = recipes[i];
-        if (statusEl) statusEl.textContent = `🤖 сканирую ${i + 1}/${recipes.length}: ${r.name}…`;
-        const matched = await checkCell(rowId, r.id);
-        if (matched) { found = true; break; }
+    try {
+        const resp = await fetch('/api/ocr-check-batch', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: row.url, recipes: recipes.map(r => ({ id: r.id, params: r.params })) }),
+        });
+        const data = await resp.json();
+        const label = String(row.label || '');
+        const results = data.results || [];
+
+        let firstMatchRecipeId = null;
+        for (const item of results) {
+            const ocrEl = document.getElementById(`ocr-${rowId}-${item.id}`);
+            const cellEl = document.getElementById(`cell-${rowId}-${item.id}`);
+            const digits = item.digits;
+            const matches = !!(digits && label && digits.replace(/^0+/, '') === label.replace(/^0+/, ''));
+            if (ocrEl) {
+                ocrEl.textContent = digits ? digits : '—';
+                ocrEl.className = 'cell-ocr ' + (digits ? (matches ? 'match' : 'mismatch') : 'mismatch');
+            }
+            cellEl?.classList.toggle('cell-match', matches);
+            if (matches && firstMatchRecipeId === null) firstMatchRecipeId = item.id;
+        }
+        if (firstMatchRecipeId !== null) {
+            found = true;
+            await markUsed(rowId, firstMatchRecipeId);
+        }
+    } catch (e) {
+        if (statusEl) statusEl.textContent = '❌ ошибка батч-запроса: ' + e;
+        rowScanState[rowId] = { scanning: false };
+        return false;
     }
+
     if (statusEl) statusEl.textContent = found ? '✅ найден рабочий фильтр' : '⚠️ ни один фильтр не совпал — нужна ручная настройка';
     rowScanState[rowId] = { scanning: false };
     return found;
