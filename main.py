@@ -407,13 +407,17 @@ OCR_REMOTE_URL = os.environ.get("OCR_REMOTE_URL", "https://bls.shikinn.com/ocr")
 # большим таймаутом именно на случай холодного старта.
 OCR_REMOTE_TIMEOUT = float(os.environ.get("OCR_REMOTE_TIMEOUT", 45))
 OCR_REMOTE_COLD_START_TIMEOUT = float(os.environ.get("OCR_REMOTE_COLD_START_TIMEOUT", 70))
-OCR_REMOTE_FIELD_NAME = os.environ.get("OCR_REMOTE_FIELD_NAME", "file")
 
 
 def _post_to_remote_ocr(image_bytes: bytes, timeout: float):
+    """ВАЖНО: bls.shikinn.com/ocr ждёт JSON {"images": "<base64>"},
+    НЕ multipart/form-data-файл — так у него написан OCRRequest.
+    Раньше здесь слался файл, из-за чего сервис падал с 500 (см. его
+    собственный traceback: RequestValidationError на теле запроса)."""
+    b64 = base64.b64encode(image_bytes).decode("ascii")
     return requests.post(
         OCR_REMOTE_URL,
-        files={OCR_REMOTE_FIELD_NAME: ("image.jpg", image_bytes, "application/octet-stream")},
+        json={"images": b64},
         timeout=timeout,
     )
 
@@ -430,9 +434,20 @@ def _retry_after_seconds(resp, default: float = 5.0, cap: float = 15.0) -> float
 
 
 def extract_via_remote_ocr(image_bytes: bytes):
-    """Отправляет уже готовые байты картинки (PNG/JPEG — не важно) на
-    внешний OCR и вытаскивает из ответа только цифры.
-    Возвращает (digits_str_or_None, error_or_None)."""
+    """Отправляет уже готовые байты картинки на внешний OCR и вытаскивает
+    из ответа только цифры. Возвращает (digits_str_or_None, error_or_None).
+
+    Контракт bls.shikinn.com/ocr (из его собственного main.py):
+      запрос:  POST JSON {"images": "<base64>"} (или список base64)
+      ответ:   {"results": [{"text": "353", "source": "..."}]}
+    "text" == "0" у этого сервиса означает "не распознал" (он и сам так
+    его использует как sentinel), поэтому трактуем "0" как отсутствие
+    результата, а не как настоящий распознанный ноль.
+
+    ОГРАНИЧЕНИЕ этого конкретного сервиса: он принудительно приводит
+    результат ровно к 3 цифрам (заточен под 3-значные капчи), всё
+    остальное превращается в "0". Если у вас цены не всегда из 3 цифр,
+    этот сервис для них всегда будет отвечать "не распознал"."""
     if not OCR_REMOTE_URL:
         return None, "OCR_REMOTE_URL не задан"
 
@@ -473,27 +488,27 @@ def extract_via_remote_ocr(image_bytes: bytes):
         print(f"[remote_ocr] ОШИБКА за {time.monotonic() - t0:.1f}с: {type(e).__name__}: {e}")
         return None, f"OCR-сервис недоступен ({OCR_REMOTE_URL}): {e}"
 
-    raw_text = None
     try:
         data = resp.json()
-        if isinstance(data, dict):
-            for key in ("text", "digits", "result", "price", "value"):
-                if data.get(key):
-                    raw_text = str(data[key])
-                    break
-            if raw_text is None:
-                raw_text = str(data)
-        else:
-            raw_text = str(data)
-    except ValueError:
-        # ответ не JSON — берём как есть (вдруг это просто "1234" текстом)
-        raw_text = resp.text
+        results = data.get("results") or []
+        raw_text = results[0].get("text") if results else None
+        source = results[0].get("source") if results else None
+    except (ValueError, IndexError, AttributeError) as e:
+        print(f"[remote_ocr] не удалось разобрать ответ: {e}, сырой ответ: {resp.text[:200]!r}")
+        return None, f"неожиданный формат ответа OCR-сервиса: {e}"
 
-    digits = re.sub(r"\D", "", raw_text or "")
+    if not raw_text or raw_text == "0":
+        print(f"[remote_ocr] сервис не распознал (source={source})")
+        return None, (
+            "OCR-сервис не смог распознать (или число не из 3 цифр — "
+            f"этот сервис принудительно ждёт ровно 3 цифры; source={source})"
+        )
+
+    digits = re.sub(r"\D", "", raw_text)
     if not digits:
-        print(f"[remote_ocr] цифры не найдены, сырой ответ: {raw_text!r}")
-        return None, f"цифры не найдены в ответе OCR-сервиса (сырой ответ: {raw_text[:200]!r})"
-    print(f"[remote_ocr] распознано: {digits}")
+        print(f"[remote_ocr] в ответе нет цифр: {raw_text!r}")
+        return None, f"в ответе OCR нет цифр: {raw_text!r}"
+    print(f"[remote_ocr] распознано: {digits} (source={source})")
     return digits, None
 
 
